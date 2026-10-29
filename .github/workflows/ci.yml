@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    name: Build and test
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+      - name: Install XcodeGen
+        run: brew install xcodegen
+      - name: Generate project
+        run: xcodegen generate
+      - name: Test CleanCore
+        run: swift test --package-path Packages/CleanCore
+      - name: Test UpdateSources
+        run: swift test --package-path Packages/UpdateSources
+      - name: Build app (ad hoc signed)
+        run: |
+          set -o pipefail
+          xcodebuild -project CleanOS.xcodeproj -scheme CleanOS -configuration Debug \
+            -derivedDataPath build/DerivedData CODE_SIGN_IDENTITY=- DEVELOPMENT_TEAM= build | tail -40

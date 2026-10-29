@@ -1,0 +1,170 @@
+name: CleanOS
+options:
+  bundleIdPrefix: com.cleanos
+  deploymentTarget:
+    macOS: "14.0"
+  createIntermediateGroups: true
+  groupSortPosition: top
+  xcodeVersion: "16.0"
+configs:
+  Debug: debug
+  Release: release
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    MACOSX_DEPLOYMENT_TARGET: "14.0"
+    CODE_SIGN_STYLE: Manual
+    CODE_SIGN_IDENTITY: "-"
+    DEVELOPMENT_TEAM: ""
+    ENABLE_HARDENED_RUNTIME: YES
+    SWIFT_STRICT_CONCURRENCY: complete
+    MARKETING_VERSION: "1.0.0"
+    CURRENT_PROJECT_VERSION: "1"
+    # Project links. Scripts/release.sh overrides CLEANOS_GITHUB_REPO from the git remote; set CLEANOS_KOFI_NAME once.
+    CLEANOS_GITHUB_REPO: "YOUR-GITHUB-USER/CleanOS"
+    CLEANOS_KOFI_NAME: "YOUR-KOFI-NAME"
+    ENABLE_USER_SCRIPT_SANDBOXING: YES
+    DEAD_CODE_STRIPPING: YES
+    GENERATE_INFOPLIST_FILE: NO
+  configs:
+    Debug:
+      SWIFT_ACTIVE_COMPILATION_CONDITIONS: DEBUG
+      ONLY_ACTIVE_ARCH: YES
+packages:
+  CleanCore:
+    path: Packages/CleanCore
+  UpdateSources:
+    path: Packages/UpdateSources
+  HelperProtocol:
+    path: Packages/HelperProtocol
+  Sparkle:
+    url: https://github.com/sparkle-project/Sparkle
+    from: "2.7.0"
+targets:
+  CleanOS:
+    type: application
+    platform: macOS
+    sources:
+      - path: App
+        excludes: ["Info.plist", "CleanOS.entitlements", "Resources/AppIcon-preview.png"]
+      - path: Rules
+        type: folder
+      - path: Helper/com.cleanos.helper.plist
+        buildPhase:
+          copyFiles:
+            destination: wrapper
+            subpath: Contents/Library/LaunchDaemons
+    info:
+      path: App/Info.plist
+      properties:
+        CFBundleName: CleanOS
+        CFBundleDisplayName: CleanOS
+        CFBundleIconFile: AppIcon
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        LSMinimumSystemVersion: $(MACOSX_DEPLOYMENT_TARGET)
+        LSApplicationCategoryType: public.app-category.utilities
+        NSHumanReadableCopyright: Copyright © 2026. All rights reserved.
+        NSHighResolutionCapable: true
+        NSSupportsAutomaticTermination: false
+        NSSupportsSuddenTermination: false
+        CFBundleURLTypes:
+          - CFBundleURLName: com.cleanos.app
+            CFBundleURLSchemes: [cleanos]
+        NSAppleEventsUsageDescription: CleanOS asks Finder to list the Trash on other disks and to reveal files.
+        NSDesktopFolderUsageDescription: CleanOS looks for screenshots, installers and application aliases on your Desktop.
+        NSDocumentsFolderUsageDescription: CleanOS looks for large files, duplicates and application service files in your Documents.
+        NSDownloadsFolderUsageDescription: CleanOS looks for installers and large files in your Downloads.
+        NSRemovableVolumesUsageDescription: CleanOS scans external disks for junk, purgeable space and application service files.
+        NSNetworkVolumesUsageDescription: CleanOS can scan network volumes when you enable them in Settings.
+        NSAppDataUsageDescription: CleanOS scans file sizes only. Grant Full Disk Access so this prompt does not repeat.
+        SMPrivilegedExecutables: {}
+        # Sparkle (in-app updates). The feed is the appcast attached to the latest GitHub release.
+        SUFeedURL: https://github.com/$(CLEANOS_GITHUB_REPO)/releases/latest/download/appcast.xml
+        SUPublicEDKey: SPARKLE_PUBLIC_KEY_PLACEHOLDER
+        SUEnableAutomaticChecks: true
+        SUAutomaticallyUpdate: true
+        SUScheduledCheckInterval: 86400
+        # Links shown in Help, Settings → About and the support nudge.
+        CleanOSRepositoryURL: https://github.com/$(CLEANOS_GITHUB_REPO)
+        CleanOSSupportURL: https://ko-fi.com/$(CLEANOS_KOFI_NAME)
+    entitlements:
+      path: App/CleanOS.entitlements
+      properties:
+        com.apple.security.automation.apple-events: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.cleanos.app
+        PRODUCT_NAME: CleanOS
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: ""
+    dependencies:
+      - package: CleanCore
+      - package: UpdateSources
+      - package: HelperProtocol
+      - package: Sparkle
+      - target: CleanOSHelper
+        copy:
+          destination: executables
+      - target: CleanOSTrashWatcher
+        copy:
+          destination: wrapper
+          subpath: Contents/Library/LoginItems
+  CleanOSHelper:
+    type: tool
+    platform: macOS
+    sources:
+      - path: Helper
+        excludes: ["*.plist"]
+    settings:
+      base:
+        PRODUCT_NAME: com.cleanos.helper
+        PRODUCT_BUNDLE_IDENTIFIER: com.cleanos.helper
+        SKIP_INSTALL: YES
+        CREATE_INFOPLIST_SECTION_IN_BINARY: YES
+        INFOPLIST_FILE: Helper/Info.plist
+    info:
+      path: Helper/Info.plist
+      properties:
+        CFBundleIdentifier: com.cleanos.helper
+        CFBundleName: com.cleanos.helper
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+    dependencies:
+      - package: HelperProtocol
+  CleanOSTrashWatcher:
+    type: application
+    platform: macOS
+    sources:
+      - path: TrashWatcher
+        excludes: ["Info.plist"]
+      - path: App/Resources/AppIcon.icns
+    info:
+      path: TrashWatcher/Info.plist
+      properties:
+        CFBundleName: CleanOS Trash Watcher
+        CFBundleDisplayName: CleanOS Trash Watcher
+        CFBundleIconFile: AppIcon
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        LSMinimumSystemVersion: $(MACOSX_DEPLOYMENT_TARGET)
+        LSUIElement: true
+        NSHighResolutionCapable: true
+    settings:
+      base:
+        PRODUCT_NAME: CleanOS Trash Watcher
+        PRODUCT_BUNDLE_IDENTIFIER: com.cleanos.trashwatcher
+        SKIP_INSTALL: YES
+    dependencies:
+      - package: CleanCore
+      - package: HelperProtocol
+schemes:
+  CleanOS:
+    build:
+      targets:
+        CleanOS: all
+    run:
+      config: Debug
+      environmentVariables:
+        CLEANOS_DRY_RUN: "1"
+    archive:
+      config: Release

@@ -1,0 +1,115 @@
+# Builds, signs, notarizes and publishes a release whenever a version tag (v1.2.3) is pushed.
+#
+# Repository secrets (Settings → Secrets and variables → Actions):
+#   MACOS_CERTIFICATE_P12       base64 of the "Developer ID Application" certificate exported as .p12
+#   MACOS_CERTIFICATE_PASSWORD  password chosen when exporting the .p12
+#   APPLE_TEAM_ID               10-character team identifier
+#   APPLE_ID                    Apple ID used for notarization
+#   APPLE_APP_PASSWORD          app-specific password for that Apple ID (appleid.apple.com)
+#   SPARKLE_PRIVATE_KEY         contents of the file written by `Scripts/sparkle-keys.sh export`
+# Repository variable: KOFI_NAME (the ko-fi.com/<name> page). Without the certificate secrets the DMG is
+# ad-hoc signed and marked as such in the release notes.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build, notarize and publish
+    runs-on: macos-latest
+    env:
+      MACOS_CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+      MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+      SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+      KEYCHAIN_PASSWORD: ${{ github.run_id }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Check that the tag matches project.yml
+        if: github.ref_type == 'tag'
+        run: |
+          VERSION="$(sed -n 's/.*MARKETING_VERSION: "\(.*\)"/\1/p' project.yml | head -1)"
+          if [[ "$GITHUB_REF_NAME" != "v$VERSION" ]]; then
+            echo "Tag $GITHUB_REF_NAME does not match MARKETING_VERSION $VERSION (run Scripts/bump-version.sh first)"
+            exit 1
+          fi
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+
+      - name: Import Developer ID certificate
+        if: env.MACOS_CERTIFICATE_P12 != ''
+        run: |
+          KEYCHAIN="$RUNNER_TEMP/release.keychain-db"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          echo "$MACOS_CERTIFICATE_P12" | base64 --decode > "$RUNNER_TEMP/certificate.p12"
+          security import "$RUNNER_TEMP/certificate.p12" -P "$MACOS_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security list-keychains -d user -s "$KEYCHAIN" login.keychain-db
+          IDENTITY="$(security find-identity -v -p codesigning "$KEYCHAIN" | grep 'Developer ID Application' | head -1 | sed 's/.*"\(.*\)".*/\1/')"
+          [[ -n "$IDENTITY" ]] || { echo "No Developer ID Application identity in the certificate"; exit 1; }
+          echo "CODESIGN_IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
+          echo "TEAM_ID=$APPLE_TEAM_ID" >> "$GITHUB_ENV"
+          rm "$RUNNER_TEMP/certificate.p12"
+
+      - name: Store notarization credentials
+        if: env.MACOS_CERTIFICATE_P12 != '' && env.APPLE_ID != ''
+        run: |
+          xcrun notarytool store-credentials "ci" --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD"
+          echo "NOTARY_PROFILE=ci" >> "$GITHUB_ENV"
+
+      - name: Prepare Sparkle signing key
+        run: |
+          if [[ -z "$SPARKLE_PRIVATE_KEY" ]]; then
+            echo "SPARKLE_PRIVATE_KEY secret is missing; the appcast cannot be signed."; exit 1
+          fi
+          printf '%s' "$SPARKLE_PRIVATE_KEY" > "$RUNNER_TEMP/sparkle.key"
+          echo "SPARKLE_PRIVATE_KEY_FILE=$RUNNER_TEMP/sparkle.key" >> "$GITHUB_ENV"
+
+      - name: Build, sign, notarize and write the appcast
+        env:
+          GITHUB_REPO: ${{ github.repository }}
+          KOFI_NAME: ${{ vars.KOFI_NAME }}
+          DEVELOPER_DIR: ""
+        run: |
+          unset DEVELOPER_DIR
+          Scripts/release.sh
+
+      - name: Release notes footer
+        id: notes
+        run: |
+          if [[ -z "${CODESIGN_IDENTITY:-}" ]]; then
+            cat > "$RUNNER_TEMP/footer.md" <<'MD'
+
+          > **Unsigned build.** This DMG is ad-hoc signed because no Developer ID certificate is configured.
+          > macOS will refuse to open it; to try it anyway, right-click the app → Open, or run
+          > `xattr -d com.apple.quarantine /Applications/CleanOS.app`.
+          MD
+          else
+            printf '\nSigned with Developer ID and notarized by Apple. CleanOS updates itself from this release.\n' > "$RUNNER_TEMP/footer.md"
+          fi
+          echo "path=$RUNNER_TEMP/footer.md" >> "$GITHUB_OUTPUT"
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: CleanOS ${{ env.VERSION }}
+          generate_release_notes: true
+          body_path: ${{ steps.notes.outputs.path }}
+          files: |
+            build/CleanOS-*.dmg
+            build/appcast.xml

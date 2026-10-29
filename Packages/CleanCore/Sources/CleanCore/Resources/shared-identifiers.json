@@ -1,0 +1,23 @@
+{
+  "comment": "Identifiers and names embedded in many apps or belonging to shared SDKs. They are never used as identity signals and never attributed to a single app.",
+  "bundleIdentifiers": [
+    "com.github.electron.framework", "com.github.squirrel", "com.electron.reactive", "com.electron.mantle", "com.github.Squirrel",
+    "org.sparkle-project.Sparkle", "org.sparkle-project.Sparkle.Autoupdate", "org.sparkle-project.Sparkle.Installer", "org.sparkle-project.Sparkle.Updater",
+    "org.sparkle-project.Downloader", "org.sparkle-project.InstallerLauncher", "org.sparkle-project.InstallerConnection", "org.sparkle-project.InstallerStatus",
+    "com.plausiblelabs.crashreporter", "io.sentry.Sentry", "com.hockeyapp.sdk.mac", "com.crashlytics", "com.google.firebase", "com.bugsnag.Bugsnag",
+    "org.chromium.ContentShell.framework", "org.chromium.Chromium.framework", "com.google.Chrome.framework", "com.brave.Browser.framework",
+    "org.mozilla.plugincontainer", "com.microsoft.appcenter", "org.webrtc.WebRTC", "com.apple.Swift", "org.swift.swift", "com.github.ReactiveCocoa",
+    "org.cocoapods", "com.segment.analytics", "com.amplitude", "com.mixpanel", "com.paddle.Paddle", "com.devmate.DevMateKit", "com.sparkle-project"
+  ],
+  "bundleIdentifierPrefixes": ["com.apple.", "org.cocoapods.", "org.sparkle-project.", "com.github.electron", "org.chromium."],
+  "names": [
+    "electron", "electronframework", "squirrel", "mantle", "reactiveobjc", "sparkle", "autoupdate", "updater", "installer", "helper", "crashpad",
+    "crashpadhandler", "chromecrashpadhandler", "framework", "frameworks", "resources", "contents", "support", "library", "cache", "caches",
+    "index", "avatar", "logs", "log", "data", "default", "temp", "tmp", "system", "google", "microsoft", "apple", "adobe", "app", "application",
+    "applications", "plugin", "plugins", "extension", "extensions", "service", "services", "agent", "daemon", "launcher", "client", "server",
+    "mac", "macos", "osx", "desktop", "pro", "lite", "free", "beta", "canary", "dev", "preview", "home", "office", "user", "users", "shared",
+    "common", "core", "base", "main", "generic", "settings", "preferences", "config", "configuration", "network", "security", "privacy",
+    "cleaner", "monitor", "notes", "mail", "calendar", "contacts", "photos", "music", "tv", "news", "maps", "books", "home", "clock", "weather",
+    "finder", "terminal", "console", "safari", "chrome", "firefox", "edge", "brave"
+  ]
+}
