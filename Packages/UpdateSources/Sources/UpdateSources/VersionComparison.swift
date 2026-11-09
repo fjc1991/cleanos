@@ -1,8 +1,8 @@
 import Foundation
 
 /// Compares dotted version strings the way Sparkle and Homebrew expect: numeric components compare
-/// numerically, missing trailing components count as zero, and a non-numeric suffix (`1.2.0_1`,
-/// `2.56.0-beta`) sorts after the plain version.
+/// numerically, missing trailing components count as zero, a leading `v` is ignored, and a text
+/// component (`1.0b2`, `2.56.0-beta`) sorts before the plain version.
 public enum VersionComparison {
     public enum Result: Sendable { case older, same, newer }
 
@@ -42,7 +42,9 @@ public enum VersionComparison {
             current = ""
             isNumber = nil
         }
-        for ch in version.trimmingCharacters(in: .whitespaces) {
+        var version = Substring(version.trimmingCharacters(in: .whitespaces))
+        if version.first == "v" || version.first == "V", version.dropFirst().first?.isNumber == true { version = version.dropFirst() }
+        for ch in version {
             if ch == "." || ch == "-" || ch == "_" || ch == "+" || ch == " " || ch == "(" || ch == ")" {
                 flush(); continue
             }
