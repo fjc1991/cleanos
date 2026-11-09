@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "comment": "Every root the deep dive lists. `match` lists the identity signals allowed for children of this root; `nameStyle` says how a child name is reduced to an identifier before matching; `depth` 2 means vendor folders are looked into. Tiers: safe (regenerable), normal (settings/data), caution (user content or shared), protected (never selectable). Sources: nektony binary strings, Pearcleaner Locations.swift, Homebrew cask zap stanzas, Apple File System Programming Guide, survey of this Mac.",
+  "comment": "Every root the deep dive lists. `match` lists the identity signals allowed for children of this root; `nameStyle` says how a child name is reduced to an identifier before matching; `depth` 2 means vendor folders are looked into. Tiers: safe (regenerable), normal (settings/data), caution (user content or shared), protected (never selectable). `needsRoot` marks roots that may hold root-owned items; each item still needs root only when the user cannot remove it. Sources: nektony binary strings, Pearcleaner Locations.swift, Homebrew cask zap stanzas, Apple File System Programming Guide, survey of this Mac.",
   "roots": [
     { "id": "user-app-support", "root": "~/Library/Application Support", "depth": 2, "group": "Application Support", "tier": "normal",
       "match": ["bundleID", "subBundleID", "extensionID", "groupID", "name", "executable", "vendor"], "nameStyle": "folder",
@@ -147,14 +147,14 @@
       "match": ["name", "vendor"], "nameStyle": "folder", "onlyNonStandard": true },
     { "id": "local-receipts", "root": "/private/var/db/receipts", "depth": 1, "group": "Receipts", "tier": "safe", "needsRoot": true,
       "match": ["pkgReceipt"], "nameStyle": "receipt" },
-    { "id": "shared-users", "roots": ["/Users/Shared", "/Users/Shared/Library/Application Support"], "depth": 1, "group": "Shared", "tier": "caution",
+    { "id": "shared-users", "roots": ["/Users/Shared", "/Users/Shared/Library/Application Support"], "depth": 1, "group": "Shared", "tier": "caution", "needsRoot": true,
       "match": ["name", "vendor", "bundleID"], "nameStyle": "folder" },
     { "id": "usr-local", "roots": ["/usr/local/bin", "/usr/local/sbin", "/usr/local/lib", "/usr/local/libexec", "/usr/local/share", "/usr/local/etc",
         "/usr/local/opt", "/usr/local/var", "/usr/local/include"],
       "depth": 1, "group": "CLI Tools", "tier": "normal", "needsRoot": true, "match": ["symlinkIntoApp", "pkgReceipt", "executable"], "nameStyle": "folder" },
     { "id": "opt", "root": "/opt", "depth": 1, "group": "CLI Tools", "tier": "caution", "needsRoot": true,
       "match": ["name", "vendor", "pkgReceipt"], "nameStyle": "folder", "skipChildren": ["homebrew", "X11", "local"] },
-    { "id": "homebrew-bin", "roots": ["/opt/homebrew/bin", "/usr/local/Homebrew/bin"], "depth": 1, "group": "CLI Tools", "tier": "normal",
+    { "id": "homebrew-bin", "roots": ["/opt/homebrew/bin", "/usr/local/Homebrew/bin"], "depth": 1, "group": "CLI Tools", "tier": "normal", "needsRoot": true,
       "match": ["symlinkIntoApp"], "nameStyle": "folder" },
     { "id": "etc-paths", "roots": ["/etc/paths.d", "/etc/manpaths.d", "/etc/resolver", "/etc/sudoers.d", "/etc/pam.d", "/etc/newsyslog.d", "/etc/profile.d"],
       "depth": 1, "group": "Shell Integration", "tier": "caution", "needsRoot": true, "match": ["name", "vendor", "fileContentIntoApp"], "nameStyle": "folder" },
@@ -162,7 +162,7 @@
       "match": ["name", "executable", "vendor"], "nameStyle": "log" },
     { "id": "root-library", "roots": ["/private/var/root/Library/Caches", "/private/var/root/Library/Application Support", "/private/var/root/Library/Preferences", "/private/var/root/Library/Logs"],
       "depth": 1, "group": "Caches", "tier": "safe", "needsRoot": true, "match": ["bundleID", "subBundleID", "name", "vendor"], "nameStyle": "plist" },
-    { "id": "tmp", "roots": ["/private/tmp", "/private/var/tmp"], "depth": 1, "group": "Temporary Files", "tier": "safe",
+    { "id": "tmp", "roots": ["/private/tmp", "/private/var/tmp"], "depth": 1, "group": "Temporary Files", "tier": "safe", "needsRoot": true,
       "match": ["bundleID", "name", "executable", "vendor"], "nameStyle": "folder" },
     { "id": "native-messaging-hosts", "roots": [
         "~/Library/Application Support/Google/Chrome/NativeMessagingHosts", "~/Library/Application Support/Google/Chrome Beta/NativeMessagingHosts",
@@ -172,7 +172,7 @@
         "~/Library/Application Support/Vivaldi/NativeMessagingHosts", "~/Library/Application Support/Arc/User Data/NativeMessagingHosts",
         "~/Library/Application Support/Mozilla/NativeMessagingHosts", "/Library/Google/Chrome/NativeMessagingHosts",
         "/Library/Application Support/Mozilla/NativeMessagingHosts", "/Library/Application Support/Google/Chrome/External Extensions"],
-      "depth": 1, "group": "Browser Integration", "tier": "normal", "match": ["bundleID", "subBundleID", "name", "jsonPathIntoApp"], "nameStyle": "json" }
+      "depth": 1, "group": "Browser Integration", "tier": "normal", "needsRoot": true, "match": ["bundleID", "subBundleID", "name", "jsonPathIntoApp"], "nameStyle": "json" }
   ],
   "standardLibrarySubdirectories": [
     "Accessibility", "Accounts", "Application Scripts", "Application Support", "Assistant", "Assistants", "Audio", "Autosave Information",

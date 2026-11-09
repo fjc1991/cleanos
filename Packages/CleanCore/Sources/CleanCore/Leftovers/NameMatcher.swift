@@ -119,15 +119,25 @@ public enum NameMatcher {
         case launchdProgram, symlinkIntoApp, aliasIntoApp, jsonPathIntoApp, fileContentIntoApp, pluginBundleID, pkgReceipt
     }
 
+    /// Reason prefix of the team-ID signal: a container that only shares the developer's Team ID prefix.
+    public static let teamReasonPrefix = "team ID "
+
     /// Tests the reduced child names against the identity. Returns the human-readable reasons, empty when nothing matched.
-    public static func match(reduced: [String], identity: AppIdentity, allowed: Set<String>, shared: SharedIdentifiers) -> [String] {
+    /// - Parameter normalizedNames: `identity.normalizedNames`, when the caller already computed it (it is called once per child).
+    public static func match(reduced: [String], identity: AppIdentity, allowed: Set<String>, shared: SharedIdentifiers,
+                             normalizedNames: Set<String>? = nil) -> [String] {
         var reasons: [String] = []
         let bundleID = identity.bundleID.lowercased()
+        let team = identity.teamID?.lowercased() ?? ""
         for candidate in reduced {
             let c = candidate.lowercased()
             if c.isEmpty { continue }
-            if allowed.contains(Signal.bundleID.rawValue), idMatches(c, bundleID) {
-                reasons.append("bundle ID")
+            if allowed.contains(Signal.bundleID.rawValue) {
+                // `group.com.example.app` and `<own team>.com.example.app` name the app as precisely as the bare bundle ID.
+                var forms = [c]
+                if c.hasPrefix("group.") { forms.append(String(c.dropFirst("group.".count))) }
+                if !team.isEmpty, c.hasPrefix(team + ".") { forms.append(String(c.dropFirst(team.count + 1))) }
+                if forms.contains(where: { idMatches($0, bundleID) }) { reasons.append("bundle ID") }
             }
             if allowed.contains(Signal.subBundleID.rawValue) {
                 for sub in identity.subBundleIDs where !shared.isShared(bundleID: sub) && idMatches(c, sub.lowercased()) && sub.lowercased() != bundleID {
@@ -147,9 +157,8 @@ public enum NameMatcher {
                     break
                 }
             }
-            if allowed.contains(Signal.teamGroup.rawValue), let team = identity.teamID?.lowercased(), !team.isEmpty,
-               c.hasPrefix(team + ".") || c == team {
-                reasons.append("team ID \(identity.teamID ?? "")")
+            if allowed.contains(Signal.teamGroup.rawValue), !team.isEmpty, c.hasPrefix(team + ".") || c == team {
+                reasons.append(teamReasonPrefix + (identity.teamID ?? ""))
             }
             if allowed.contains(Signal.iCloudID.rawValue) {
                 for container in identity.iCloudContainerIDs where idMatches(c, container.lowercased()) {
@@ -157,7 +166,7 @@ public enum NameMatcher {
                     break
                 }
             }
-            if allowed.contains(Signal.name.rawValue), nameMatches(c, identity: identity, shared: shared) {
+            if allowed.contains(Signal.name.rawValue), nameMatches(c, names: normalizedNames ?? identity.normalizedNames, shared: shared) {
                 reasons.append("app name")
             }
             if allowed.contains(Signal.executable.rawValue), let exe = identity.executable {
@@ -191,11 +200,51 @@ public enum NameMatcher {
     }
 
     static func nameMatches(_ candidate: String, identity: AppIdentity, shared: SharedIdentifiers) -> Bool {
+        nameMatches(candidate, names: identity.normalizedNames, shared: shared)
+    }
+
+    static func nameMatches(_ candidate: String, names: Set<String>, shared: SharedIdentifiers) -> Bool {
         let normalizedCandidate = normalize(candidate)
         guard !normalizedCandidate.isEmpty, !shared.isGenericName(normalizedCandidate) else { return false }
-        for name in identity.normalizedNames {
+        for name in names {
             if name.count >= 5, normalizedCandidate == name { return true }
             if name.count == 4, candidate == name { return true }   // "zoom" → exact raw match only
+        }
+        return false
+    }
+
+    /// True when the normalised `token` occurs in `component` starting and ending at word boundaries: the ends of the
+    /// component, punctuation or spaces, a lower-to-upper case change, or a letter/digit change. `KSInstallAction.AnxY8`
+    /// contains `ksinstallaction`, `remoting_host_1` contains `remotinghost`, but `devbox` does not contain `vbox`.
+    public static func containsWord(_ token: String, in component: String) -> Bool {
+        guard !token.isEmpty else { return false }
+        let original = Array(component)
+        var letters: [Character] = []
+        var originalIndex: [Int] = []
+        for (index, character) in original.enumerated() where character.isLetter || character.isNumber {
+            letters.append(character.lowercased().first ?? character)
+            originalIndex.append(index)
+        }
+        let needle = Array(token)
+        guard needle.count <= letters.count else { return false }
+        func isBoundary(before position: Int) -> Bool {
+            // `position` indexes `original`; true when a word starts there.
+            guard position > 0 else { return true }
+            let previous = original[position - 1]
+            let current = original[position]
+            if !(previous.isLetter || previous.isNumber) { return true }
+            if previous.isLowercase && current.isUppercase { return true }
+            if previous.isLetter != current.isLetter { return true }
+            return false
+        }
+        func isBoundary(after position: Int) -> Bool {
+            // `position` indexes `original`; true when a word ends there.
+            guard position + 1 < original.count else { return true }
+            return isBoundary(before: position + 1)
+        }
+        for start in 0...(letters.count - needle.count) where letters[start] == needle[0] {
+            guard Array(letters[start..<(start + needle.count)]) == needle else { continue }
+            if isBoundary(before: originalIndex[start]) && isBoundary(after: originalIndex[start + needle.count - 1]) { return true }
         }
         return false
     }

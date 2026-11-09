@@ -61,8 +61,9 @@ public actor AppCatalog {
     public func scan(locations: [URL], extraBundleURLs: [URL] = [], includeSystem: Bool = false, skipList: [String] = [],
                      progress: (@Sendable (Int) -> Void)? = nil) async -> [InstalledApp] {
         var bundleURLs = Self.findAppBundles(in: locations + Self.wellKnownExtraLocations, skipList: skipList)
-        let known = Set(bundleURLs.map { $0.standardizedFileURL.path })
-        for url in extraBundleURLs where url.pathExtension == "app" && !known.contains(url.standardizedFileURL.path) && !url.path.hasPrefix("/System/") {
+        var known = Set(bundleURLs.map { Self.resolvedPath($0) })
+        for url in extraBundleURLs where url.pathExtension == "app" && !url.path.hasPrefix("/System/") {
+            guard known.insert(Self.resolvedPath(url)).inserted else { continue }
             bundleURLs.append(url)
         }
 
@@ -94,9 +95,12 @@ public actor AppCatalog {
     }
 
     /// Synchronous enumeration (NSEnumerator cannot be iterated from an async context).
+    /// One bundle reached several ways (a symlink in `/Applications` or `~/Applications`, a Caskroom link, overlapping
+    /// locations) is listed once, under its real path when one of the ways is the real path.
     public static func findAppBundles(in locations: [URL], skipList: [String]) -> [URL] {
         var bundleURLs: [URL] = []
-        var seen: Set<String> = []
+        var indexByResolved: [String: Int] = [:]
+        let skip = skipList.map { $0.count > 1 && $0.hasSuffix("/") ? String($0.dropLast()) : $0 }.filter { !$0.isEmpty }
         let fm = FileManager.default
         for location in locations {
             guard let enumerator = fm.enumerator(at: location, includingPropertiesForKeys: [.isDirectoryKey],
@@ -106,13 +110,33 @@ public actor AppCatalog {
                 guard url.pathExtension == "app" else { continue }
                 enumerator.skipDescendants()
                 let path = url.standardizedFileURL.path
-                if seen.contains(path) { continue }
-                if skipList.contains(where: { path.hasPrefix($0) }) { continue }
-                seen.insert(path)
+                let resolved = resolvedPath(url)
+                if skip.contains(where: { isInside(path, $0) || isInside(resolved, $0) }) { continue }
+                if let index = indexByResolved[resolved] {
+                    // Prefer the real location over a symlink to it.
+                    if isSymlink(bundleURLs[index]), !isSymlink(url) { bundleURLs[index] = url }
+                    continue
+                }
+                indexByResolved[resolved] = bundleURLs.count
                 bundleURLs.append(url)
             }
         }
         return bundleURLs
+    }
+
+    /// The bundle path with symlinks resolved, so one app reached two ways compares equal.
+    static func resolvedPath(_ url: URL) -> String {
+        url.standardizedFileURL.resolvingSymlinksInPath().path
+    }
+
+    static func isSymlink(_ url: URL) -> Bool {
+        var info = stat()
+        return lstat(url.path, &info) == 0 && (info.st_mode & S_IFMT) == S_IFLNK
+    }
+
+    /// `path` is `folder` or inside it (`/Applications/Foo` does not contain `/Applications/Foobar.app`).
+    static func isInside(_ path: String, _ folder: String) -> Bool {
+        path == folder || path.hasPrefix(folder.hasSuffix("/") ? folder : folder + "/")
     }
 
     static func cacheKey(_ url: URL) -> String {

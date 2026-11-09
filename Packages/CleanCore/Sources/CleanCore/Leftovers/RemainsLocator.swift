@@ -30,11 +30,33 @@ public actor RemainsLocator {
     public let rules: Rules
     private let home: String
     private let registrations: RegistrationReader?
+    private let appLookup: @Sendable (String) -> LaunchServicesLookup.Resolution
+    private var lookupCache: [String: LaunchServicesLookup.Resolution] = [:]
 
-    public init(rules: Rules = .bundled, home: String = NSHomeDirectory(), registrations: RegistrationReader? = nil) {
+    /// - Parameter appLookup: where Launch Services knows an app with the bundle ID to be; replaceable in tests.
+    public init(rules: Rules = .bundled, home: String = NSHomeDirectory(), registrations: RegistrationReader? = nil,
+                appLookup: @escaping @Sendable (String) -> LaunchServicesLookup.Resolution = LaunchServicesLookup.resolve(bundleID:)) {
         self.rules = rules
         self.home = home
         self.registrations = registrations
+        self.appLookup = appLookup
+    }
+
+    /// True when Launch Services knows an app with this bundle ID, installed somewhere the catalog did not scan or on a volume
+    /// that is not mounted right now (both mean: not a leftover).
+    private func registeredElsewhere(_ bundleID: String) -> Bool {
+        let key = bundleID.lowercased()
+        guard !key.isEmpty else { return false }
+        let resolution = lookupCache[key] ?? appLookup(bundleID)
+        lookupCache[key] = resolution
+        return resolution == .present || resolution == .onUnmountedVolume
+    }
+
+    /// The identifier and its parents down to three components: `com.vendor.app.helper` → itself and `com.vendor.app`.
+    static func bundleIDCandidates(_ identifier: String) -> [String] {
+        let parts = identifier.split(separator: ".").map(String.init)
+        guard parts.count >= 3 else { return parts.count == 2 ? [identifier] : [] }
+        return (3...parts.count).reversed().map { parts.prefix($0).joined(separator: ".") }
     }
 
     struct Orphan {
@@ -63,6 +85,43 @@ public actor RemainsLocator {
     static let installerTempPatterns = ["KSInstallAction.*", "KSDownloadAction.*", "KSOutOfProcessFetcher.*", "com.google.Keystone", "*.pkg", "*.dmg",
                                         "*Installer*", "*installer*", "*.mpkg", "Adobe*", "com.adobe.*", "com.microsoft.*", "msupdate*"]
 
+    /// Which running software may still be using an installer temporary item: (name patterns, bundle-ID patterns, process names).
+    static let installerTempOwners: [(patterns: [String], bundleIDs: [String], processes: [String])] = [
+        (["KSInstallAction.*", "KSDownloadAction.*", "KSOutOfProcessFetcher.*", "com.google.Keystone"], ["com.google."],
+         ["ksinstall", "ksadmin", "googlesoftwareupdateagent", "googlesoftwareupdatedaemon", "googleupdater"]),
+        (["Adobe*", "com.adobe.*"], ["com.adobe."], ["adobedesktopservice", "adobeipcbroker", "adobecrdaemon"]),
+        (["com.microsoft.*", "msupdate*"], ["com.microsoft."], ["microsoftautoupdate", "microsoftupdateassistant", "msupdate"]),
+        (["*.pkg", "*.mpkg", "*Installer*", "*installer*"], ["com.apple.installer"], ["installer"]),
+        (["*.dmg"], ["com.apple.diskimagemounter"], ["diskimagemounter"]),
+    ]
+
+    /// `X Safe Storage` keychain items (Chromium and Electron encryption keys) → the apps that create them.
+    static let safeStorageOwners: [String: [String]] = [
+        "chrome": ["com.google.Chrome", "com.google.Chrome.beta", "com.google.Chrome.dev", "com.google.Chrome.canary"],
+        "chromium": ["org.chromium.Chromium"],
+        "brave": ["com.brave.Browser", "com.brave.Browser.beta", "com.brave.Browser.nightly"],
+        "microsoftedge": ["com.microsoft.edgemac", "com.microsoft.edgemac.Beta", "com.microsoft.edgemac.Dev", "com.microsoft.edgemac.Canary"],
+        "opera": ["com.operasoftware.Opera", "com.operasoftware.OperaGX", "com.operasoftware.OperaAir"],
+        "operagx": ["com.operasoftware.OperaGX"],
+        "vivaldi": ["com.vivaldi.Vivaldi", "com.vivaldi.Vivaldi.snapshot"],
+        "arc": ["company.thebrowser.Browser"],
+        "slack": ["com.tinyspeck.slackmacgap"],
+        "discord": ["com.hnc.Discord"],
+        "code": ["com.microsoft.VSCode"],
+        "codeinsiders": ["com.microsoft.VSCodeInsiders"],
+        "cursor": ["com.todesktop.230313mzl4w4u92"],
+        "signal": ["org.whispersystems.signal-desktop"],
+        "claude": ["com.anthropic.claudefordesktop"],
+        "postman": ["com.postmanlabs.mac"],
+        "notion": ["notion.id"],
+        "obsidian": ["md.obsidian"],
+        "figma": ["com.figma.Desktop"],
+        "microsoftteams": ["com.microsoft.teams2", "com.microsoft.teams"],
+        "dockerdesktop": ["com.docker.docker"],
+    ]
+    /// Safe Storage names used by many apps (development builds of any Electron app): never attributed to one.
+    static let genericSafeStorageNames: Set<String> = ["electron", "electronapp", "app", "chromiumembedded"]
+
     /// - Parameter appLocations: folders that hold applications, checked for broken bundles (no Info.plist, missing executable).
     public func locate(installed: [InstalledApp], previouslyInstalled: [InstalledApp] = [], runningBundleIDs: Set<String> = [],
                        skipList: [String] = [], appLocations: [URL] = [URL(filePath: "/Applications"), URL(filePath: NSHomeDirectory() + "/Applications")]) async -> RemainsScanResult {
@@ -75,9 +134,18 @@ public actor RemainsLocator {
         let installedProcessNames = Set(identities.flatMap { Array($0.processNames) + [$0.name, $0.fileName] + ($0.executable.map { [$0] } ?? []) }.map { NameMatcher.normalize($0) })
         let running = Set(runningBundleIDs.map { $0.lowercased() })
         let runningProcessNames = Set(ProcessMonitor.snapshot().map { NameMatcher.normalize($0.name) })
+        let home = self.home
+        // A family is gone only when no app of it is installed, none of its processes runs, and nothing that means "still
+        // installed" exists (a JDK, another Docker runtime, a CLI from Homebrew…).
         let absentFamilies = rules.families.filter { family in
-            !family.bundleIDPrefixes.contains { prefix in installedIDs.contains { $0.hasPrefix(prefix.lowercased()) } }
+            if family.bundleIDPrefixes.contains(where: { prefix in installedIDs.contains { $0.hasPrefix(prefix.lowercased()) } }) { return false }
+            if family.processNames.contains(where: { name in
+                let n = NameMatcher.normalize(name)
+                return n.count >= 4 && runningProcessNames.contains(n)
+            }) { return false }
+            return !(family.installedIfExists ?? []).contains { !PathExpander.glob(PathExpander.expand($0, home: home)).isEmpty }
         }
+        let preparedIdentities = identities.map { ($0, $0.normalizedNames) }
         // Vendor rules of installed apps claim their paths and launchd labels (Dropbox's crashpad group, Paragon's installer helper…).
         var claimedByInstalled: Set<String> = []
         var ownedLabels: Set<String> = []
@@ -139,7 +207,7 @@ public actor RemainsLocator {
                     let path = child.standardizedFileURL.path
                     if claimed.contains(path) || claimedByInstalled.contains(path) { continue }
                     if rule.id == "tmp" {
-                        if let orphan = installerTempOrphan(child, rule: rule) { orphans.append(orphan) }
+                        if let orphan = installerTempOrphan(child, rule: rule, running: running, runningProcessNames: runningProcessNames) { orphans.append(orphan) }
                         continue
                     }
                     guard let candidate = NameMatcher.reduce(name, style: rule.nameStyle).first, !candidate.isEmpty else { continue }
@@ -148,8 +216,14 @@ public actor RemainsLocator {
                     if rules.protectedRules.isProtected(path, home: home) { continue }
                     if Self.isOwned(candidate, shape: shape, installedIDs: installedIDs, installedTeams: installedTeams, installedGroups: installedGroups, running: running) { continue }
                     if ownedLabels.contains(where: { fnmatch($0, candidate, 0) == 0 }) { continue }
-                    if identities.contains(where: { !NameMatcher.match(reduced: [candidate], identity: $0, allowed: ["bundleID", "subBundleID", "extensionID", "groupID", "teamGroup", "iCloudID", "name", "label"], shared: rules.shared).isEmpty }) { continue }
+                    if preparedIdentities.contains(where: { identity, names in
+                        !NameMatcher.match(reduced: [candidate], identity: identity, allowed: ["bundleID", "subBundleID", "extensionID", "groupID", "teamGroup", "iCloudID", "name", "label"],
+                                           shared: rules.shared, normalizedNames: names).isEmpty
+                    }) { continue }
                     if ["user-launch-agents", "local-launch-agents", "local-launch-daemons"].contains(rule.id), Self.launchdProgramExists(child) { continue }
+                    // Ownership was decided from the scanned folders only; Launch Services also knows apps elsewhere
+                    // (another volume, a folder outside the Locations), including ones on a disk that is not connected.
+                    if Self.bundleIDCandidates(Self.embeddedIdentifier(candidate, shape: shape, original: name)).contains(where: { registeredElsewhere($0) }) { continue }
 
                     var tier = rule.tier
                     var subtitle: String?
@@ -164,7 +238,7 @@ public actor RemainsLocator {
                     if rule.id == "user-mobile-documents" { subtitle = "iCloud container, possibly from an iPhone or iPad app"; confidence = .low }
                     let (ownerKey, ownerTitle) = Self.owner(for: candidate, shape: shape, original: name)
                     orphans.append(Orphan(url: child, item: nil, ownerKey: ownerKey, ownerTitle: ownerTitle, group: rule.group, tier: tier,
-                                          needsRoot: rule.requiresRoot, matchedBy: reasons, subtitle: subtitle, confidence: confidence, familyID: nil))
+                                          needsRoot: LeftoverLocator.needsRoot(rule, child), matchedBy: reasons, subtitle: subtitle, confidence: confidence, familyID: nil))
                 }
             }
         }
@@ -187,7 +261,7 @@ public actor RemainsLocator {
         for var orphan in orphans {
             let path = orphan.path
             if skipList.contains(where: { path == $0 || path.hasPrefix($0 + "/") }) { continue }
-            if orphan.familyID == nil, let family = Self.family(for: path, in: absentFamilies) {
+            if orphan.familyID == nil, let family = Self.family(for: path, in: absentFamilies, home: home) {
                 orphan.familyID = family.id
                 orphan.ownerKey = "family:\(family.id)"
                 orphan.ownerTitle = family.displayName
@@ -265,8 +339,12 @@ public actor RemainsLocator {
             if installedIDs.contains(where: { lower == $0 || lower.hasPrefix($0 + ".") }) { continue }
             // Packages that install only shared infrastructure (e.g. Rosetta, fonts) are kept unless a family claims them.
             let family = absentFamilies.first { $0.pkgReceipts.contains { fnmatch($0.lowercased(), lower, 0) == 0 } }
+            // Cheap checks first: every receipt that survives costs two pkgutil runs.
+            if family == nil, let vendor = Self.vendorPrefix(of: lower), installedVendorPrefixes.contains(vendor) { continue }
+            if family == nil, ownedLabelsForReceipts.contains(where: { fnmatch($0, lower, 0) == 0 }) { continue }
             guard let info = PackageReceipts.info(identifier) else { continue }
-            let payload = PackageReceipts.payloadPaths(manifest: PackageReceipts.manifest(identifier), base: info.base)
+            let manifest = PackageReceipts.manifest(identifier)
+            let payload = PackageReceipts.payloadPaths(manifest: manifest, base: info.base)
             let existing = payload.filter(\.exists)
             // A payload folder that still contains an installed app (or any .app) means the software is simply pkg-installed.
             let containsInstalledApp = existing.contains { entry in
@@ -275,8 +353,6 @@ public actor RemainsLocator {
             if containsInstalledApp && family == nil { continue }
             // Without a family, only receipts whose payload is mostly gone are leftovers (printer drivers, CLI tools and fonts stay).
             if family == nil, !payload.isEmpty, existing.count * 2 > payload.count { continue }
-            if family == nil, let vendor = Self.vendorPrefix(of: lower), installedVendorPrefixes.contains(vendor) { continue }
-            if family == nil, ownedLabelsForReceipts.contains(where: { fnmatch($0, lower, 0) == 0 }) { continue }
             let productTitle = Self.receiptTitle(identifier)
             let ownerKey = family.map { "family:\($0.id)" } ?? "receipt:\(lower)"
             let ownerTitle = family?.displayName ?? productTitle
@@ -288,12 +364,13 @@ public actor RemainsLocator {
             receiptItem.payload["confidence"] = family == nil ? "medium" : "high"
             out.append(Orphan(url: nil, item: receiptItem, ownerKey: ownerKey, ownerTitle: ownerTitle, group: "Receipts", tier: .safe, needsRoot: true,
                               matchedBy: receiptItem.matchedBy, subtitle: detail, confidence: family == nil ? .medium : .high, familyID: family?.id))
-            for entry in existing {
-                let url = URL(filePath: entry.path)
-                if rules.protectedRules.isProtected(entry.path, home: home) { continue }
-                if installedAppPaths.contains(where: { entry.path.hasPrefix($0) }) { continue }
-                let group = entry.path.hasPrefix("/Library/LaunchAgents") || entry.path.hasPrefix("/Library/LaunchDaemons") || entry.path.hasPrefix("/Library/PrivilegedHelperTools") ? "Login Items"
-                    : entry.path.hasPrefix("/Applications") ? "Executables" : entry.path.hasPrefix("/usr/local") ? "CLI Tools" : "Application Support"
+            // Only what the package alone owns: never a shared parent, never a folder holding files it did not install.
+            for path in PackageReceipts.ownedPayloadPaths(manifest: manifest, base: info.base) {
+                let url = URL(filePath: path)
+                if rules.protectedRules.isProtected(path, home: home) { continue }
+                if installedAppPaths.contains(where: { path == $0 || path.hasPrefix($0 + "/") || $0.hasPrefix(path + "/") }) { continue }
+                let group = path.hasPrefix("/Library/LaunchAgents/") || path.hasPrefix("/Library/LaunchDaemons/") || path.hasPrefix("/Library/PrivilegedHelperTools/") ? "Login Items"
+                    : path.hasPrefix("/Applications/") ? "Executables" : path.hasPrefix("/usr/local/") ? "CLI Tools" : "Application Support"
                 out.append(Orphan(url: url, item: nil, ownerKey: ownerKey, ownerTitle: ownerTitle, group: group, tier: .normal,
                                   needsRoot: !FileRemover.isUserRemovable(url), matchedBy: ["installed by package \(identifier)"], subtitle: nil,
                                   confidence: family == nil ? .medium : .high, familyID: family?.id))
@@ -321,14 +398,20 @@ public actor RemainsLocator {
         var out: [Orphan] = []
         let fm = FileManager.default
         for family in families {
-            for pattern in family.paths {
+            let patterns = family.paths.map { ($0, false) } + (family.cautionPaths ?? []).map { ($0, true) }
+            for (pattern, sharedWithOtherTools) in patterns {
                 for path in PathExpander.glob(PathExpander.expand(pattern, home: home)) {
                     if rules.protectedRules.isProtected(path, home: home) { continue }
                     let url = URL(filePath: path)
                     let group = Self.group(forPath: path, home: home)
+                    // Synced cloud folders and user documents are never pre-selected.
+                    let cautious = sharedWithOtherTools || Self.cautionGroups.contains(group)
                     out.append(Orphan(url: url, item: nil, ownerKey: "family:\(family.id)", ownerTitle: family.displayName, group: group,
-                                      tier: group == "User Data" ? .caution : .normal, needsRoot: !FileRemover.isUserRemovable(url),
-                                      matchedBy: ["known \(family.displayName) location, app not installed"], subtitle: nil, confidence: .high, familyID: family.id))
+                                      tier: cautious ? .caution : .normal, needsRoot: !FileRemover.isUserRemovable(url),
+                                      matchedBy: ["known \(family.displayName) location, app not installed"],
+                                      subtitle: group == "Cloud" ? "Cloud storage folder; may hold files that are not synced anywhere else"
+                                          : sharedWithOtherTools ? "May also be used by other tools" : nil,
+                                      confidence: .high, familyID: family.id))
                 }
             }
             for dir in ["/Library/LaunchAgents", "/Library/LaunchDaemons", home + "/Library/LaunchAgents"] {
@@ -344,13 +427,24 @@ public actor RemainsLocator {
         return out
     }
 
-    static func family(for path: String, in families: [LeftoverFamily]) -> LeftoverFamily? {
-        let normalized = NameMatcher.normalize(path.replacingOccurrences(of: "/", with: " "))
-        return families.first { family in family.normalizedTokens.contains { normalized.contains($0) } }
+    /// The family whose tokens name one of the path's components, at word boundaries. Only the part below the home folder is
+    /// looked at, so a user called `slack` or `steam` does not pull every orphan into one family.
+    static func family(for path: String, in families: [LeftoverFamily], home: String = NSHomeDirectory()) -> LeftoverFamily? {
+        var relative = path
+        if !home.isEmpty, home != "/", path == home || path.hasPrefix(home + "/") { relative = String(path.dropFirst(home.count)) }
+        let components = relative.split(separator: "/").map(String.init).filter { !$0.isEmpty }
+        guard !components.isEmpty else { return nil }
+        return families.first { family in
+            family.normalizedTokens.contains { token in components.contains { NameMatcher.containsWord(token, in: $0) } }
+        }
     }
+
+    /// Groups whose items are never pre-selected in Remains.
+    static let cautionGroups: Set<String> = ["User Data", "Cloud"]
 
     static func group(forPath path: String, home: String) -> String {
         let p = path.hasPrefix(home) ? "~" + path.dropFirst(home.count) : path
+        if p.hasPrefix("~/Library/CloudStorage") || p.hasPrefix("~/Library/Mobile Documents") { return "Cloud" }
         if p.contains("/LaunchAgents/") || p.contains("/LaunchDaemons/") || p.contains("/PrivilegedHelperTools/") { return "Login Items" }
         if p.hasPrefix("~/Library/Caches") || p.hasPrefix("/Library/Caches") { return "Caches" }
         if p.hasPrefix("~/Library/Preferences") || p.hasPrefix("/Library/Preferences") { return "Preferences" }
@@ -371,16 +465,27 @@ public actor RemainsLocator {
 
     // MARK: - Pass 5: installer temporary folders
 
-    private func installerTempOrphan(_ url: URL, rule: LeftoverRoot) -> Orphan? {
+    /// Installer temporary items untouched for a day whose installer or updater is not running.
+    private func installerTempOrphan(_ url: URL, rule: LeftoverRoot, running: Set<String>, runningProcessNames: Set<String>) -> Orphan? {
         let name = url.lastPathComponent
         guard Self.installerTempPatterns.contains(where: { fnmatch($0, name, 0) == 0 }) else { return nil }
         guard let values = try? url.resourceValues(forKeys: [.contentModificationDateKey, .fileSecurityKey]),
-              let modified = values.contentModificationDate, Date().timeIntervalSince(modified) > 3600 else { return nil }
+              let modified = values.contentModificationDate, Date().timeIntervalSince(modified) > 24 * 3600 else { return nil }
+        if Self.installerTempOwnerIsRunning(name, running: running, runningProcessNames: runningProcessNames) { return nil }
         var owner: uid_t = 0
         if let security = values.fileSecurity { CFFileSecurityGetOwner(security, &owner) }
         return Orphan(url: url, item: nil, ownerKey: "installer-temp", ownerTitle: "Installer temporary files", group: "Temporary Files", tier: .safe,
                       needsRoot: owner != getuid() || !FileRemover.isUserRemovable(url),
-                      matchedBy: ["installer temporary folder older than an hour" + (owner == 0 ? ", owned by root" : "")], subtitle: nil, confidence: .medium, familyID: nil)
+                      matchedBy: ["installer temporary item untouched for a day" + (owner == 0 ? ", owned by root" : "")], subtitle: nil, confidence: .medium, familyID: nil)
+    }
+
+    /// True when software that writes items named like `name` (an updater, an installer) is running and may still need them.
+    static func installerTempOwnerIsRunning(_ name: String, running: Set<String>, runningProcessNames: Set<String>) -> Bool {
+        for owner in installerTempOwners where owner.patterns.contains(where: { fnmatch($0, name, 0) == 0 }) {
+            if running.contains(where: { BundleIDPattern.matchesAny(owner.bundleIDs, $0) }) { return true }
+            if owner.processes.contains(where: { runningProcessNames.contains($0) }) { return true }
+        }
+        return false
     }
 
     // MARK: - Pass 6: crash reports
@@ -449,21 +554,20 @@ public actor RemainsLocator {
             if lower.hasPrefix("com.apple.") || lower.isEmpty || lower == "-" { return true }
             if installedIDs.contains(lower) { return true }
             if installedIDs.contains(where: { lower.hasPrefix($0 + ".") }) { return true }
-            // Bundle IDs that Launch Services still resolves are installed somewhere we did not scan.
-            return LaunchServicesLookup.applicationExists(bundleID: bundleID)
+            // Bundle IDs that Launch Services still resolves are installed somewhere we did not scan (or on a disconnected disk).
+            return registeredElsewhere(bundleID)
         }
         func pathExists(_ path: String) -> Bool {
             if FileManager.default.fileExists(atPath: path) { return true }
             if let range = path.range(of: ".app/") { return FileManager.default.fileExists(atPath: String(path[..<range.upperBound].dropLast())) }
             return false
         }
-        for (index, handler) in reader.launchServicesHandlers().enumerated() {
-            let roles = handler.filter { $0.key.hasPrefix("LSHandlerRole") }.values
+        for handler in reader.launchServicesHandlers() {
+            let roles = handler.filter { $0.key.hasPrefix("LSHandlerRole") }.sorted { $0.key < $1.key }.map(\.value)
             guard let bundleID = roles.first(where: { !installed($0) }) else { continue }
-            let subject = handler["LSHandlerURLScheme"].map { "URL scheme \($0)://" } ?? handler["LSHandlerContentType"].map { "file type \($0)" } ?? handler["LSHandlerContentTag"].map { "extension .\($0)" } ?? "handler"
-            out.append(Orphan(url: nil, item: ScanItem(id: "registration:ls:\(index):\(subject)", title: "Default handler for \(subject)", subtitle: "Points at missing app \(bundleID)",
-                                                      kind: .registration, group: "Launch Services", tier: .safe, matchedBy: ["Launch Services handler for a missing app"],
-                                                      payload: ["type": "lsHandler", "index": String(index), "subject": subject, "confidence": "high"]),
+            // The handler is identified by what it handles, never by its position: indices shift after the first removal.
+            guard let item = Self.launchServicesHandlerItem(handler, missingBundleID: bundleID) else { continue }
+            out.append(Orphan(url: nil, item: item,
                               ownerKey: "id:\(bundleID.lowercased())", ownerTitle: Self.owner(for: bundleID.lowercased(), shape: .bundleID, original: bundleID).1,
                               group: "Launch Services", tier: .safe, needsRoot: false, matchedBy: [], subtitle: nil, confidence: .high, familyID: nil))
         }
@@ -491,7 +595,13 @@ public actor RemainsLocator {
             let haystack = [item.service, item.label].compactMap { $0?.lowercased() }
             guard let safeStorage = haystack.first(where: { $0.hasSuffix(" safe storage") }) else { continue }
             let product = NameMatcher.normalize(safeStorage.replacingOccurrences(of: " safe storage", with: ""))
-            guard product.count >= 4, !installedProcessNames.contains(where: { $0 == product || $0.hasPrefix(product) || product.hasPrefix($0) }) else { continue }
+            if product.isEmpty || Self.genericSafeStorageNames.contains(product) { continue }
+            if let owners = Self.safeStorageOwners[product] {
+                // A known key: its app decides (installed, or known to Launch Services anywhere, even on a disconnected disk).
+                if owners.contains(where: { installed($0) }) { continue }
+            } else {
+                guard product.count >= 4, !installedProcessNames.contains(where: { $0 == product || $0.hasPrefix(product) || product.hasPrefix($0) }) else { continue }
+            }
             var payload = ["type": "keychain", "class": item.itemClass, "confidence": "medium"]
             if let ref = item.persistentRef { payload["ref"] = ref.base64EncodedString() }
             out.append(Orphan(url: nil, item: ScanItem(id: "registration:keychain:\(item.itemClass):\(item.service ?? "")\(item.account ?? "")", title: item.displayName,
@@ -518,9 +628,39 @@ public actor RemainsLocator {
         return out
     }
 
+    /// The keys that identify a Launch Services handler, in the order they are tried.
+    static let launchServicesMatchKeys = ["LSHandlerURLScheme", "LSHandlerContentType", "LSHandlerContentTag"]
+
+    /// A registration item for a handler that points at a missing app. The payload names the handler by content
+    /// (`matchKey` = `matchValue`, pointing at `role`) so the remover finds the right entry however the array has shifted.
+    /// Nil when the handler has none of the identifying keys and so could not be matched safely.
+    static func launchServicesHandlerItem(_ handler: [String: String], missingBundleID: String) -> ScanItem? {
+        guard let matchKey = launchServicesMatchKeys.first(where: { handler[$0]?.isEmpty == false }), let matchValue = handler[matchKey] else { return nil }
+        let subject: String
+        switch matchKey {
+        case "LSHandlerURLScheme": subject = "URL scheme \(matchValue)://"
+        case "LSHandlerContentType": subject = "file type \(matchValue)"
+        default: subject = "extension .\(matchValue)"
+        }
+        return ScanItem(id: "registration:ls:\(matchKey):\(matchValue):\(missingBundleID)", title: "Default handler for \(subject)",
+                        subtitle: "Points at missing app \(missingBundleID)", kind: .registration, group: "Launch Services", tier: .safe,
+                        matchedBy: ["Launch Services handler for a missing app"],
+                        payload: ["type": "lsHandler", "subject": subject, "role": missingBundleID, "matchKey": matchKey,
+                                  "matchValue": matchValue, "confidence": "high"])
+    }
+
     // MARK: - Shapes and ownership
 
     enum Shape { case bundleID, teamPrefixed, groupID }
+
+    /// The bundle-ID part of an identifier-shaped name: `TEAMID.com.vendor.app` → `com.vendor.app`, `group.com.vendor` → `com.vendor`.
+    static func embeddedIdentifier(_ candidate: String, shape: Shape, original: String) -> String {
+        switch shape {
+        case .bundleID: return candidate
+        case .teamPrefixed: return candidate.split(separator: ".").dropFirst().joined(separator: ".")
+        case .groupID: return String(candidate.dropFirst("group.".count))
+        }
+    }
 
     static func identifierShape(_ candidate: String, original: String) -> Shape? {
         if candidate.hasPrefix("group.") { return .groupID }
@@ -534,9 +674,7 @@ public actor RemainsLocator {
     }
 
     static func vendorPrefix(of id: String) -> String? {
-        let parts = id.split(separator: ".")
-        guard parts.count >= 3 else { return nil }
-        return parts.prefix(2).joined(separator: ".").lowercased()
+        AppIdentity.vendorPrefix(of: id)
     }
 
     static func isOwned(_ candidate: String, shape: Shape, installedIDs: Set<String>, installedTeams: Set<String>, installedGroups: Set<String>, running: Set<String>) -> Bool {
@@ -598,7 +736,7 @@ public actor RemainsLocator {
                 guard let program = programs.first, program.hasPrefix("/"), !fm.fileExists(atPath: program) else { continue }
                 let label = dict["Label"] as? String ?? plist.deletingPathExtension().lastPathComponent
                 out.append(Orphan(url: plist, item: nil, ownerKey: "id:\(label.lowercased().split(separator: ".").prefix(3).joined(separator: "."))", ownerTitle: Self.owner(for: label.lowercased(), shape: .bundleID, original: label).1,
-                                  group: "Login Items", tier: .normal, needsRoot: dir.hasPrefix("/"), matchedBy: ["launchd program missing: \(program)"],
+                                  group: "Login Items", tier: .normal, needsRoot: dir.hasPrefix("/") && !FileRemover.isUserRemovable(plist), matchedBy: ["launchd program missing: \(program)"],
                                   subtitle: "Program no longer exists: \(program)", confidence: .high, familyID: nil))
             }
         }
@@ -623,7 +761,7 @@ public actor RemainsLocator {
                           let path = json["path"] as? String, !fm.fileExists(atPath: path) else { continue }
                     let name = file.deletingPathExtension().lastPathComponent
                     out.append(Orphan(url: file, item: nil, ownerKey: "id:\(name.lowercased().split(separator: ".").prefix(3).joined(separator: "."))", ownerTitle: Self.owner(for: name.lowercased(), shape: .bundleID, original: name).1,
-                                      group: "Browser Integration", tier: .safe, needsRoot: rule.requiresRoot, matchedBy: ["native messaging host target missing"],
+                                      group: "Browser Integration", tier: .safe, needsRoot: LeftoverLocator.needsRoot(rule, file), matchedBy: ["native messaging host target missing"],
                                       subtitle: "Host binary missing: \(path)", confidence: .high, familyID: nil))
                 }
             }
@@ -668,9 +806,39 @@ public actor RemainsLocator {
 }
 
 /// Asks Launch Services whether any app with the bundle ID is registered (apps outside the scanned folders).
-enum LaunchServicesLookup {
+public enum LaunchServicesLookup {
+    public enum Resolution: Sendable, Equatable {
+        /// Launch Services knows no app with the identifier.
+        case notRegistered
+        /// At least one registered copy exists on disk.
+        case present
+        /// Registered on a volume that is not mounted now (an external disk): the app may well still exist.
+        case onUnmountedVolume
+        /// Registered, but every copy is gone from a mounted volume.
+        case stale
+    }
+
+    public static func resolve(bundleID: String) -> Resolution {
+        guard !bundleID.isEmpty,
+              let urls = LSCopyApplicationURLsForBundleIdentifier(bundleID as CFString, nil)?.takeRetainedValue() as? [URL], !urls.isEmpty else {
+            return .notRegistered
+        }
+        return classify(urls.map(\.path))
+    }
+
+    /// Classifies registered paths: present if any exists, on an unmounted volume if any lives under `/Volumes/<name>` that is
+    /// not there, stale otherwise.
+    static func classify(_ paths: [String], fileExists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) }) -> Resolution {
+        if paths.contains(where: fileExists) { return .present }
+        let offline = paths.contains { path in
+            let parts = path.split(separator: "/", omittingEmptySubsequences: true)
+            guard parts.count >= 2, parts[0] == "Volumes" else { return false }
+            return !fileExists("/Volumes/\(parts[1])")
+        }
+        return offline ? .onUnmountedVolume : .stale
+    }
+
     static func applicationExists(bundleID: String) -> Bool {
-        guard let urls = LSCopyApplicationURLsForBundleIdentifier(bundleID as CFString, nil)?.takeRetainedValue() as? [URL] else { return false }
-        return urls.contains { FileManager.default.fileExists(atPath: $0.path) }
+        resolve(bundleID: bundleID) == .present
     }
 }

@@ -51,6 +51,20 @@ import Testing
         #expect(m("com.apple.finder.plist", .plist, ["bundleID", "name", "vendor"]) == [])
     }
 
+    @Test func groupAndTeamPrefixedNamesMatchTheBundleID() {
+        let identity = AppIdentity(bundleID: "com.example.app", name: "Example", fileName: "Example", teamID: "ABCDE12345")
+        let shared = Rules.bundled.shared
+        func m(_ name: String, _ allowed: Set<String>) -> [String] {
+            NameMatcher.match(reduced: NameMatcher.reduce(name, style: .folder), identity: identity, allowed: allowed, shared: shared)
+        }
+        #expect(m("group.com.example.app", ["bundleID"]) == ["bundle ID"])
+        #expect(m("group.com.example.app.share", ["bundleID"]) == ["bundle ID"])
+        #expect(m("ABCDE12345.com.example.app", ["bundleID", "teamGroup"]) == ["bundle ID", "team ID ABCDE12345"])
+        #expect(m("ZZZZZ99999.com.example.app", ["bundleID"]) == [])       // someone else's team prefix
+        #expect(m("ABCDE12345.com.example.other", ["bundleID", "teamGroup"]) == ["team ID ABCDE12345"])
+        #expect(m("group.com.example.application", ["bundleID"]) == [])
+    }
+
     @Test func genericNamesNeverMatchAlone() {
         let identity = AppIdentity(bundleID: "com.example.cache", name: "Cache", fileName: "Cache", executable: "Cache")
         let reasons = NameMatcher.match(reduced: ["cache"], identity: identity, allowed: ["name", "executable"], shared: Rules.bundled.shared)

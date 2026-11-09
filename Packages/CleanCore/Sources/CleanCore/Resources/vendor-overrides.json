@@ -1,15 +1,37 @@
 {
-  "comment": "Per-vendor include/exclude rules for layouts that cannot be inferred from identity signals. `bundleIDPrefix` is matched against the app's bundle identifier (case-insensitive prefix). Paths may start with ~ and may contain * globs. Seeded from Homebrew cask zap stanzas and the survey of this Mac.",
+  "comment": "Per-vendor include/exclude rules for layouts that cannot be inferred from identity signals. `bundleIDPrefix` (and the optional `bundleIDs`) is matched against the app's bundle identifier, case-insensitively: exactly, or as a namespace prefix only when it ends in '.'. A rule another installed app also matches describes paths still in use, so its paths are skipped. `sharedWith` lists other apps (same pattern rules) that use a path; when one is installed the path is caution. `onlyIfEmptyAfter` lists a folder only when everything in it is part of the same removal. Paths may start with ~ and may contain * globs. Seeded from Homebrew cask zap stanzas and the survey of this Mac.",
   "overrides": [
     { "bundleIDPrefix": "com.brave.Browser", "include": [
         { "path": "~/Library/Application Support/BraveSoftware/Brave-Browser", "group": "Application Support", "tier": "normal" },
         { "path": "~/Library/Caches/BraveSoftware/Brave-Browser", "group": "Caches", "tier": "safe" },
+        { "path": "~/Library/Application Support/BraveSoftware", "group": "Application Support", "tier": "normal", "onlyIfEmptyAfter": true },
+        { "path": "~/Library/Caches/BraveSoftware", "group": "Caches", "tier": "safe", "onlyIfEmptyAfter": true } ] },
+    { "bundleIDPrefix": "com.brave.Browser.beta", "include": [
+        { "path": "~/Library/Application Support/BraveSoftware/Brave-Browser-Beta", "group": "Application Support", "tier": "normal" },
+        { "path": "~/Library/Caches/BraveSoftware/Brave-Browser-Beta", "group": "Caches", "tier": "safe" },
+        { "path": "~/Library/Application Support/BraveSoftware", "group": "Application Support", "tier": "normal", "onlyIfEmptyAfter": true },
+        { "path": "~/Library/Caches/BraveSoftware", "group": "Caches", "tier": "safe", "onlyIfEmptyAfter": true } ] },
+    { "bundleIDPrefix": "com.brave.Browser.nightly", "include": [
+        { "path": "~/Library/Application Support/BraveSoftware/Brave-Browser-Nightly", "group": "Application Support", "tier": "normal" },
+        { "path": "~/Library/Caches/BraveSoftware/Brave-Browser-Nightly", "group": "Caches", "tier": "safe" },
+        { "path": "~/Library/Application Support/BraveSoftware", "group": "Application Support", "tier": "normal", "onlyIfEmptyAfter": true },
         { "path": "~/Library/Caches/BraveSoftware", "group": "Caches", "tier": "safe", "onlyIfEmptyAfter": true } ] },
     { "bundleIDPrefix": "com.microsoft.VSCode", "include": [
         { "path": "~/Library/Application Support/Code", "group": "Application Support", "tier": "normal" },
         { "path": "~/.vscode", "group": "Dotfiles", "tier": "normal" },
-        { "path": "~/.vscode-shared", "group": "Dotfiles", "tier": "normal" },
+        { "path": "~/.vscode-shared", "group": "Dotfiles", "tier": "normal", "sharedWith": ["com.microsoft.VSCodeInsiders"] },
         { "path": "/usr/local/bin/code", "group": "CLI Tools", "tier": "normal" } ] },
+    { "bundleIDPrefix": "com.microsoft.VSCodeInsiders", "include": [
+        { "path": "~/Library/Application Support/Code - Insiders", "group": "Application Support", "tier": "normal" },
+        { "path": "~/.vscode-insiders", "group": "Dotfiles", "tier": "normal" },
+        { "path": "~/.vscode-shared", "group": "Dotfiles", "tier": "normal", "sharedWith": ["com.microsoft.VSCode"] },
+        { "path": "/usr/local/bin/code-insiders", "group": "CLI Tools", "tier": "normal" } ] },
+    { "bundleIDPrefix": "org.mozilla.firefox", "include": [
+        { "path": "~/Library/Application Support/Firefox", "group": "Application Support", "tier": "normal",
+          "sharedWith": ["org.mozilla.firefoxdeveloperedition", "org.mozilla.nightly", "org.mozilla.firefoxbeta"], "sharedNote": "Profiles folder shared by every Firefox edition" },
+        { "path": "~/Library/Caches/Firefox", "group": "Caches", "tier": "safe",
+          "sharedWith": ["org.mozilla.firefoxdeveloperedition", "org.mozilla.nightly", "org.mozilla.firefoxbeta"] },
+        { "path": "~/Library/Caches/Mozilla/updates/Applications/Firefox", "group": "Caches", "tier": "safe" } ] },
     { "bundleIDPrefix": "us.zoom.xos", "include": [
         { "path": "~/.zoomus", "group": "Dotfiles", "tier": "normal" },
         { "path": "~/Documents/Zoom", "group": "User Data", "tier": "caution" },
@@ -44,7 +66,7 @@
         { "path": "/Library/DropboxHelperTools", "group": "Login Items", "tier": "normal", "needsRoot": true } ],
       "launchdLabels": ["com.dropbox.DropboxMacUpdate.agent", "com.dropbox.dropboxmacupdate.xpcservice", "com.dropbox.DropboxUpdater.wake"] },
     { "bundleIDPrefix": "com.docker.docker", "include": [
-        { "path": "~/.docker", "group": "Dotfiles", "tier": "normal" },
+        { "path": "~/.docker", "group": "Dotfiles", "tier": "caution", "sharedNote": "Docker CLI settings, also used by other Docker runtimes (OrbStack, colima, Rancher Desktop)" },
         { "path": "~/Library/Application Support/Docker Desktop", "group": "Application Support", "tier": "normal" },
         { "path": "~/Library/Application Support/docker-secrets-engine", "group": "Application Support", "tier": "normal" },
         { "path": "~/Library/Caches/Docker Desktop", "group": "Caches", "tier": "safe" },
@@ -57,17 +79,28 @@
       "launchdLabels": ["com.docker.helper", "com.docker.socket", "com.docker.vmnetd"] },
     { "bundleIDPrefix": "com.google.Chrome", "include": [
         { "path": "~/Library/Application Support/Google/Chrome", "group": "Application Support", "tier": "normal" },
-        { "path": "~/Library/Caches/Google/Chrome", "group": "Caches", "tier": "safe" },
-        { "path": "~/Library/Google/GoogleSoftwareUpdate", "group": "Application Support", "tier": "caution", "sharedNote": "Keystone updater shared by all Google apps" },
-        { "path": "~/Library/Caches/com.google.Keystone*", "group": "Caches", "tier": "caution" },
-        { "path": "~/Library/Caches/com.google.SoftwareUpdate", "group": "Caches", "tier": "caution" },
-        { "path": "~/Library/LaunchAgents/com.google.keystone.*.plist", "group": "Login Items", "tier": "caution" },
-        { "path": "~/Library/Preferences/com.google.Keystone.Agent.plist", "group": "Preferences", "tier": "caution" },
+        { "path": "~/Library/Caches/Google/Chrome", "group": "Caches", "tier": "safe" } ] },
+    { "bundleIDPrefix": "com.google.Chrome.canary", "include": [
+        { "path": "~/Library/Application Support/Google/Chrome Canary", "group": "Application Support", "tier": "normal" },
+        { "path": "~/Library/Caches/Google/Chrome Canary", "group": "Caches", "tier": "safe" } ] },
+    { "bundleIDPrefix": "com.google.Chrome.beta", "include": [
+        { "path": "~/Library/Application Support/Google/Chrome Beta", "group": "Application Support", "tier": "normal" },
+        { "path": "~/Library/Caches/Google/Chrome Beta", "group": "Caches", "tier": "safe" } ] },
+    { "bundleIDPrefix": "com.google.Chrome.dev", "include": [
+        { "path": "~/Library/Application Support/Google/Chrome Dev", "group": "Application Support", "tier": "normal" },
+        { "path": "~/Library/Caches/Google/Chrome Dev", "group": "Caches", "tier": "safe" } ] },
+    { "bundleIDPrefix": "com.google.Chrome", "bundleIDs": ["com.google.Chrome.canary", "com.google.Chrome.beta", "com.google.Chrome.dev"], "include": [
+        { "path": "~/Library/Google/GoogleSoftwareUpdate", "group": "Application Support", "tier": "caution", "sharedNote": "Keystone updater shared by all Google apps", "sharedWith": ["com.google."] },
+        { "path": "~/Library/Caches/com.google.Keystone*", "group": "Caches", "tier": "caution", "sharedWith": ["com.google."] },
+        { "path": "~/Library/Caches/com.google.SoftwareUpdate", "group": "Caches", "tier": "caution", "sharedWith": ["com.google."] },
+        { "path": "~/Library/LaunchAgents/com.google.keystone.*.plist", "group": "Login Items", "tier": "caution", "sharedWith": ["com.google."] },
+        { "path": "~/Library/Preferences/com.google.Keystone.Agent.plist", "group": "Preferences", "tier": "caution", "sharedWith": ["com.google."] },
         { "path": "~/Library/Logs/GoogleSoftwareUpdateAgent.log", "group": "Logs", "tier": "safe" },
-        { "path": "/Library/Google", "group": "Application Support", "tier": "caution", "needsRoot": true },
-        { "path": "/Library/Caches/com.google.SoftwareUpdate.*", "group": "Caches", "tier": "caution", "needsRoot": true },
-        { "path": "/Library/LaunchAgents/com.google.keystone.*.plist", "group": "Login Items", "tier": "caution", "needsRoot": true },
-        { "path": "/Library/LaunchDaemons/com.google.*.plist", "group": "Login Items", "tier": "caution", "needsRoot": true } ] },
+        { "path": "/Library/Google", "group": "Application Support", "tier": "caution", "needsRoot": true, "sharedWith": ["com.google."] },
+        { "path": "/Library/Caches/com.google.SoftwareUpdate.*", "group": "Caches", "tier": "caution", "needsRoot": true, "sharedWith": ["com.google."] },
+        { "path": "/Library/LaunchAgents/com.google.keystone.*.plist", "group": "Login Items", "tier": "caution", "needsRoot": true, "sharedWith": ["com.google."] },
+        { "path": "/Library/LaunchDaemons/com.google.keystone.*.plist", "group": "Login Items", "tier": "caution", "needsRoot": true, "sharedWith": ["com.google."] },
+        { "path": "/Library/LaunchDaemons/com.google.GoogleUpdater.*.plist", "group": "Login Items", "tier": "caution", "needsRoot": true, "sharedWith": ["com.google."] } ] },
     { "bundleIDPrefix": "com.microsoft.", "include": [
         { "path": "~/Library/Group Containers/UBF8T346G9.*", "group": "Group Containers", "tier": "caution", "sharedNote": "Shared by every Microsoft app" },
         { "path": "~/Library/Application Support/Microsoft", "group": "Application Support", "tier": "caution", "sharedNote": "Shared by every Microsoft app" },
@@ -89,7 +122,7 @@
         { "path": "/Library/Application Support/Adobe", "group": "Application Support", "tier": "caution", "needsRoot": true },
         { "path": "/Library/Logs/Adobe", "group": "Logs", "tier": "safe", "needsRoot": true },
         { "path": "/Users/Shared/Adobe", "group": "Shared", "tier": "caution", "needsRoot": true } ] },
-    { "bundleIDPrefix": "com.parallels.desktop", "include": [
+    { "bundleIDPrefix": "com.parallels.desktop.console", "include": [
         { "path": "~/.parallels_settings", "group": "Dotfiles", "tier": "normal" },
         { "path": "~/Applications (Parallels)", "group": "User Data", "tier": "caution" },
         { "path": "~/Parallels", "group": "User Data", "tier": "caution" },
@@ -130,7 +163,7 @@
         { "path": "~/.condarc", "group": "Dotfiles", "tier": "normal" },
         { "path": "/opt/anaconda3", "group": "CLI Tools", "tier": "caution", "needsRoot": true } ],
       "pkgReceipts": ["com.anaconda.pkg.*"], "shellRCMarkers": ["conda initialize", "/opt/anaconda3"] },
-    { "bundleIDPrefix": "com.paragon-software.ntfs", "include": [
+    { "bundleIDPrefix": "com.paragon-software.ntfs.fsapp", "include": [
         { "path": "/Library/Filesystems/ufsd_NTFS.fs", "group": "Drivers", "tier": "caution", "needsRoot": true },
         { "path": "/Library/Extensions/ufsd_NTFS.kext", "group": "Kernel & System Extensions", "tier": "caution", "needsRoot": true },
         { "path": "/Library/Application Support/Paragon Software", "group": "Application Support", "tier": "normal", "needsRoot": true },

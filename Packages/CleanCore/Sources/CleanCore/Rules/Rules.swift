@@ -46,24 +46,48 @@ public struct OverridePath: Codable, Sendable, Hashable {
     public var tier: RiskTier
     public var needsRoot: Bool?
     public var sharedNote: String?
+    /// Listed only when everything inside the folder is already part of the same removal (a vendor folder the removal empties).
     public var onlyIfEmptyAfter: Bool?
+    /// Other apps known to use this path (bundle-ID patterns, see `BundleIDPattern`). When one of them is installed the path is caution.
+    public var sharedWith: [String]?
+}
+
+/// Bundle-ID patterns used by the rule files: an exact, case-insensitive identifier, or a whole namespace when the pattern ends in ".".
+public enum BundleIDPattern {
+    public static func matches(_ pattern: String, _ bundleID: String) -> Bool {
+        let p = pattern.lowercased()
+        let id = bundleID.lowercased()
+        guard !p.isEmpty, !id.isEmpty else { return false }
+        return p.hasSuffix(".") ? id.hasPrefix(p) : id == p
+    }
+
+    public static func matchesAny(_ patterns: [String], _ bundleID: String) -> Bool {
+        patterns.contains { matches($0, bundleID) }
+    }
 }
 
 public struct VendorOverride: Codable, Sendable, Hashable {
+    /// The app's bundle ID. Matched exactly, or as a namespace prefix when it ends in "." (`com.microsoft.`), so a rule for
+    /// `com.google.Chrome` never applies to `com.google.Chrome.canary` or to Chrome's web-app shims.
     public var bundleIDPrefix: String
+    /// Further bundle IDs (same pattern rules) the rule applies to, for paths several channels of one product share.
+    public var bundleIDs: [String]?
     public var include: [OverridePath]?
     public var exclude: [String]?
     public var pkgReceipts: [String]?
     public var launchdLabels: [String]?
     public var shellRCMarkers: [String]?
+
+    public func matches(bundleID: String) -> Bool {
+        BundleIDPattern.matches(bundleIDPrefix, bundleID) || BundleIDPattern.matchesAny(bundleIDs ?? [], bundleID)
+    }
 }
 
 public struct VendorOverrides: Codable, Sendable {
     public var overrides: [VendorOverride]
 
     public func matching(bundleID: String) -> [VendorOverride] {
-        let lower = bundleID.lowercased()
-        return overrides.filter { lower.hasPrefix($0.bundleIDPrefix.lowercased()) }
+        overrides.filter { $0.matches(bundleID: bundleID) }
     }
 }
 
@@ -77,8 +101,13 @@ public struct LeftoverFamily: Codable, Sendable, Hashable, Identifiable {
     public var pkgReceipts: [String]
     public var launchdLabels: [String]
     public var processNames: [String]
+    /// The software counts as installed when any of these exists (paths or globs: runtimes, CLI tools, non-app bundles,
+    /// or competing products that use the same files).
+    public var installedIfExists: [String]?
+    /// Paths (globs) reported at caution because other tools may use them too.
+    public var cautionPaths: [String]?
 
-    /// Normalised tokens for substring matching against paths.
+    /// Normalised tokens matched against path components.
     public var normalizedTokens: [String] { tokens.map { NameMatcher.normalize($0) }.filter { $0.count >= 4 } }
 }
 
