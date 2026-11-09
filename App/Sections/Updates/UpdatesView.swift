@@ -8,6 +8,9 @@ final class UpdatesModel {
     var updates: [AvailableUpdate] = []
     var isChecking = false
     var checkedAt: Date?
+    /// Apps (or "Homebrew") whose last check failed, and whether the Mac was offline.
+    var failed: [String] = []
+    var isOffline = false
     var selectedID: String?
     var checked: Set<String> = []
     var busy: Set<String> = []
@@ -17,7 +20,7 @@ final class UpdatesModel {
 
     func check(force: Bool = false) async {
         guard !isChecking else { return }
-        if !force, let cached = await manager.cached() { updates = cached.updates; checkedAt = cached.checkedAt; return }
+        if !force, let cached = await manager.cached() { show(cached); return }
         isChecking = true
         let apps = await appProvider?() ?? []
         let updatable = apps.map { app in
@@ -25,11 +28,31 @@ final class UpdatesModel {
                          sparkleFeedURL: app.identity.sparkleFeedURL.flatMap(URL.init(string:)), hasMASReceipt: app.identity.hasMASReceipt)
         }
         let skip = Set((try? JSONDecoder().decode([String].self, from: UserDefaults.standard.data(forKey: SettingsKey.skipListUpdates) ?? Data())) ?? [])
-        let snapshot = await manager.check(apps: updatable, skipList: skip)
-        updates = snapshot.updates
-        checkedAt = snapshot.checkedAt
+        show(await manager.check(apps: updatable, skipList: skip))
         isChecking = false
     }
+
+    private func show(_ snapshot: UpdateManager.Snapshot) {
+        updates = snapshot.updates
+        checkedAt = snapshot.checkedAt
+        failed = snapshot.failed
+        isOffline = snapshot.isOffline
+    }
+
+    /// Shown instead of "up to date" when some checks did not complete.
+    var failureSummary: String? {
+        if isOffline { return "No internet connection" }
+        guard let first = failed.first else { return nil }
+        return failed.count == 1 ? "Could not check \(first)" : "Could not check \(failed.count) apps"
+    }
+
+    var failedNames: String {
+        let shown = failed.prefix(5).joined(separator: ", ")
+        return failed.count > 5 ? "\(shown) and \(failed.count - 5) more" : shown
+    }
+
+    /// Sidebar badge: no "Up to date" when nothing was found because checks failed.
+    var badgeCount: Int? { updates.isEmpty && failureSummary != nil ? nil : updates.count }
 
     var sections: [(title: String, updates: [AvailableUpdate])] {
         let apps = updates.filter { $0.origin != .homebrewFormula }
@@ -42,31 +65,61 @@ final class UpdatesModel {
 
     var selected: AvailableUpdate? { updates.first { $0.id == selectedID } }
 
-    func apply(_ update: AvailableUpdate) async {
-        busy.insert(update.id)
-        defer { busy.remove(update.id) }
+    /// Only Homebrew installs the update itself; Sparkle apps are opened so their own updater installs the signed
+    /// update, and App Store apps are updated by the App Store.
+    static func actionTitle(for update: AvailableUpdate) -> String {
         switch update.origin {
-        case .homebrewCask, .homebrewFormula:
-            let (ok, output) = await HomebrewSource().upgrade(update)
-            log[update.id] = output
-            if ok { updates.removeAll { $0.id == update.id } }
-        case .appStore:
-            NSWorkspace.shared.open(URL(string: "macappstore://showUpdatesPage")!)
-            log[update.id] = "Opened the App Store updates page."
-        case .sparkle:
-            if let download = update.downloadURL {
-                NSWorkspace.shared.open(download)
-                log[update.id] = "Download started in your browser; open the file to install."
-            } else if let app = update.appURL {
-                NSWorkspace.shared.open(app)
-                log[update.id] = "Opened the app; use its Check for Updates command."
-            }
+        case .sparkle: "Open App"
+        case .appStore: "Open App Store"
+        case .homebrewCask, .homebrewFormula: "Upgrade"
         }
     }
 
+    var bulkTitle: String {
+        let picked = updates.filter { checked.contains($0.id) }
+        let upgrades = picked.filter { $0.origin == .homebrewCask || $0.origin == .homebrewFormula }.count
+        let opens = picked.count - upgrades
+        return switch (upgrades, opens) {
+        case (0, 0): "Upgrade Selected"
+        case (_, 0): "Upgrade \(upgrades)"
+        case (0, _): opens == 1 ? "Open 1 App" : "Open \(opens) Apps"
+        default: "Upgrade \(upgrades), Open \(opens)"
+        }
+    }
+
+    func apply(_ update: AvailableUpdate) async {
+        switch update.origin {
+        case .homebrewCask, .homebrewFormula:
+            busy.insert(update.id)
+            defer { busy.remove(update.id) }
+            let (ok, output) = await HomebrewSource().upgrade(update)
+            log[update.id] = output
+            if ok {
+                updates.removeAll { $0.id == update.id }
+                checked.remove(update.id)
+                await manager.remove(updateID: update.id)
+            }
+        case .appStore:
+            NSWorkspace.shared.open(URL(string: "macappstore://showUpdatesPage")!)
+            log[update.id] = "Opened the App Store. Install the update from its Updates page."
+        case .sparkle:
+            guard let app = update.appURL else { return }
+            NSWorkspace.shared.open(app)
+            log[update.id] = "Opened \(update.displayName). Its built-in updater verifies and installs the update; if no prompt appears, choose Check for Updates… in its app menu."
+        }
+    }
+
+    /// Secondary action for Sparkle rows: the enclosure (https only) in the browser, outside the app's signature check.
+    func download(_ update: AvailableUpdate) {
+        guard let url = update.downloadURL, url.scheme == "https" else { return }
+        NSWorkspace.shared.open(url)
+        log[update.id] = "Download opened in your browser. Unlike the app's own updater, CleanOS does not verify this file."
+    }
+
     func applyChecked() async {
-        for update in updates where checked.contains(update.id) { await apply(update) }
+        let picked = updates.filter { checked.contains($0.id) }
         checked.removeAll()
+        for update in picked { await apply(update) }
     }
 }
 
@@ -79,12 +132,22 @@ struct UpdatesView: View {
         SectionLayout(section: .updates) {
             if model.isChecking { HStack(spacing: 8) { ProgressView().controlSize(.small); Text("Checking…").font(.callout).foregroundStyle(.secondary) } }
             else {
+                if let warning = model.failureSummary, !model.updates.isEmpty {
+                    Label(warning, systemImage: "exclamationmark.triangle").font(.caption).foregroundStyle(.orange).help(model.failed.joined(separator: ", "))
+                }
                 if let date = model.checkedAt { Text("Checked \(date.formatted(.relative(presentation: .named)))").font(.caption).foregroundStyle(.secondary) }
                 Button { Task { await model.check(force: true) } } label: { Label("Check Now", systemImage: "arrow.clockwise") }
             }
         } primary: {
             if model.updates.isEmpty && !model.isChecking {
-                ContentUnavailableView("Everything is up to date", systemImage: "checkmark.seal", description: Text("No updates were found for Sparkle apps, App Store apps or Homebrew."))
+                if model.isOffline {
+                    ContentUnavailableView("No internet connection", systemImage: "wifi.slash", description: Text("Connect to the internet, then choose Check Now."))
+                } else if let summary = model.failureSummary {
+                    ContentUnavailableView(summary, systemImage: "exclamationmark.triangle",
+                                           description: Text("No updates were found for the other apps. Not checked: \(model.failedNames)."))
+                } else {
+                    ContentUnavailableView("Everything is up to date", systemImage: "checkmark.seal", description: Text("No updates were found for Sparkle apps, App Store apps or Homebrew."))
+                }
             } else {
                 List(selection: $model.selectedID) {
                     ForEach(model.sections, id: \.title) { section in
@@ -106,6 +169,10 @@ struct UpdatesView: View {
                                     if model.busy.contains(update.id) { ProgressView().controlSize(.small) }
                                 }
                                 .tag(update.id)
+                                .contextMenu {
+                                    Button(UpdatesModel.actionTitle(for: update)) { Task { await model.apply(update) } }.disabled(model.busy.contains(update.id))
+                                    if update.origin == .sparkle, update.downloadURL != nil { Button("Download in Browser") { model.download(update) } }
+                                }
                             }
                         }
                     }
@@ -126,8 +193,17 @@ struct UpdatesView: View {
                         if let notes = update.releaseNotesURL { Link("Release notes", destination: notes).font(.callout) }
                     }
                     if let log = model.log[update.id] { ScrollView { Text(log).font(.caption.monospaced()).frame(maxWidth: .infinity, alignment: .leading) }.frame(maxHeight: 200).card() }
-                    Button(update.origin == .appStore ? "Open App Store" : "Update") { Task { await model.apply(update) } }
-                        .buttonStyle(PrimaryActionButtonStyle()).disabled(model.busy.contains(update.id))
+                    if update.origin == .sparkle {
+                        Text("Opens \(update.displayName) so its own updater can download, verify and install the update.").font(.caption).foregroundStyle(.secondary)
+                    }
+                    HStack(spacing: 12) {
+                        Button(UpdatesModel.actionTitle(for: update)) { Task { await model.apply(update) } }
+                            .buttonStyle(PrimaryActionButtonStyle()).disabled(model.busy.contains(update.id))
+                        if update.origin == .sparkle, update.downloadURL != nil {
+                            Button("Download") { model.download(update) }.buttonStyle(.link).font(.callout)
+                                .help("Downloads the update in your browser without the app's own signature check.")
+                        }
+                    }
                     Spacer()
                 }
                 .padding(16)
@@ -135,11 +211,11 @@ struct UpdatesView: View {
                 ContentUnavailableView("Updates", systemImage: "arrow.triangle.2.circlepath", description: Text("Update your applications to keep them running smoothly and avoid any issues."))
             }
         } footer: {
-            Button(model.checked.isEmpty ? "Update" : "Update \(model.checked.count)") { Task { await model.applyChecked() } }
+            Button(model.bulkTitle) { Task { await model.applyChecked() } }
                 .buttonStyle(PrimaryActionButtonStyle()).disabled(model.checked.isEmpty)
         }
-        .task { model.appProvider = { await appModel.installedApps() }; await model.check(); appModel.updateCount = model.updates.count }
-        .onChange(of: model.updates.count) { _, count in appModel.updateCount = count }
+        .task { model.appProvider = { await appModel.installedApps() }; await model.check(); appModel.updateCount = model.badgeCount }
+        .onChange(of: model.badgeCount) { _, count in appModel.updateCount = count }
         .onChange(of: appModel.rescanToken) { _, _ in Task { await model.check(force: true) } }
     }
 }
