@@ -8,8 +8,10 @@ final class ExtensionsModel {
     var results: [String: [ScanItem]] = [:]
     var scanning: Set<String> = []
     var selectedGroupID: String? = ExtensionsScanner.groups.first?.id
-    var expanded: Set<String> = []
+    /// Groups the user folded away; everything is expanded until then.
+    var collapsed: Set<String> = []
     var busy: Set<String> = []
+    var errors: [String: String] = [:]
     let selection = SelectionStore()
     let scanner = ExtensionsScanner()
     var apps: [InstalledApp] = []
@@ -38,7 +40,12 @@ final class ExtensionsModel {
         guard let id = item.payload["identifier"] else { return }
         busy.insert(item.id)
         let enabled = item.payload["enabled"] == "1"
-        _ = PluginkitController.setEnabled(identifier: id, !enabled)
+        defer { busy.remove(item.id) }
+        if let error = PluginkitController.setEnabled(identifier: id, !enabled) {
+            errors[item.id] = error   // the switch stays where it was
+            return
+        }
+        errors[item.id] = nil
         for (group, items) in results {
             results[group] = items.map { node in
                 var node = node
@@ -47,11 +54,28 @@ final class ExtensionsModel {
                     if child.id == item.id { child.payload["enabled"] = enabled ? "0" : "1"; child.subtitle = (enabled ? "Disabled" : "Enabled") + " · " + (child.payload["identifier"] ?? "") }
                     return child
                 }
-                if node.id == item.id { node.payload["enabled"] = enabled ? "0" : "1" }
+                if node.id == item.id {
+                    node.payload["enabled"] = enabled ? "0" : "1"
+                    node.subtitle = (enabled ? "Disabled" : "Enabled") + " · " + (node.payload["identifier"] ?? "")
+                }
                 return node
             }
         }
-        busy.remove(item.id)
+    }
+
+    /// Browsers whose extensions are about to be removed: they must not be running, or they would write the
+    /// extension back or mark it corrupted.
+    func browsers(for items: [ScanItem]) -> [InstalledApp] {
+        let ids = Set(items.compactMap { $0.payload["browser"] })
+        return apps.filter { ids.contains($0.bundleID) }
+    }
+
+    /// Quits those browsers politely (they restore their windows next time); returns the ones still open.
+    static func quitBrowsers(_ browsers: [InstalledApp]) async -> [String] {
+        let running = browsers.flatMap { NSRunningApplication.runningApplications(withBundleIdentifier: $0.bundleID) }
+        for app in running { app.terminate() }
+        for _ in 0..<40 where !running.allSatisfy(\.isTerminated) { try? await Task.sleep(for: .milliseconds(250)) }
+        return running.filter { !$0.isTerminated }.compactMap(\.localizedName)
     }
 }
 
@@ -83,6 +107,9 @@ struct ExtensionsView: View {
                         .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(model.selectedGroupID == group.id ? Theme.accent.opacity(0.18) : .clear))
                         .contentShape(Rectangle())
                         .onTapGesture { model.selectedGroupID = group.id }
+                        .accessibilityElement(children: .combine)
+                        .accessibilityAddTraits(.isButton)
+                        .accessibilityAction { model.selectedGroupID = group.id }
                     }
                 }
                 .padding(8)
@@ -118,8 +145,11 @@ struct ExtensionsView: View {
             }
         } footer: {
             let items = model.selectedItems
-            if !items.isEmpty { Text("\(items.count) items · \(items.reduce(0) { $0 + $1.size }.formattedBytes)").font(.callout.monospacedDigit()).foregroundStyle(.secondary).padding(.trailing, 8) }
-            Button("Remove") { removalFlow = RemovalFlow(title: "Remove extensions", apps: [], items: items) }
+            if !items.isEmpty { Text("\(countText(items.count, "item")) · \(items.reduce(0) { $0 + $1.size }.formattedBytes)").font(.callout.monospacedDigit()).foregroundStyle(.secondary).padding(.trailing, 8) }
+            Button("Remove") {
+                let browsers = model.browsers(for: items)
+                removalFlow = RemovalFlow(title: "Remove extensions", apps: browsers, items: items, quit: { await ExtensionsModel.quitBrowsers(browsers) })
+            }
                 .buttonStyle(PrimaryActionButtonStyle()).disabled(items.isEmpty)
         }
         .task { model.appProvider = { await appModel.installedApps() }; await model.scanAll(volumes: appModel.volumes) }
@@ -141,7 +171,7 @@ struct ExtensionTree: View {
                 if item.children.isEmpty {
                     row(item)
                 } else {
-                    DisclosureGroup(isExpanded: Binding(get: { model.expanded.contains(item.id) || model.expanded.isEmpty }, set: { if $0 { model.expanded.insert(item.id) } else { model.expanded.remove(item.id) } })) {
+                    DisclosureGroup(isExpanded: Binding(get: { !model.collapsed.contains(item.id) }, set: { if $0 { model.collapsed.remove(item.id) } else { model.collapsed.insert(item.id) } })) {
                         ForEach(item.children) { row($0) }
                     } label: {
                         GroupLabel(item: item, selection: model.selection)
@@ -155,13 +185,17 @@ struct ExtensionTree: View {
     @ViewBuilder private func row(_ item: ScanItem) -> some View {
         HStack {
             ScanItemRow(item: item, selection: model.selection)
-            if item.payload["type"] == "pluginkit" {
+            if item.payload["type"] == "pluginkit", item.tier != .protected {
+                if let error = model.errors[item.id] {
+                    Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(Theme.warning).help(error).accessibilityLabel(error)
+                }
                 Toggle("", isOn: Binding(get: { item.payload["enabled"] == "1" }, set: { _ in model.togglePluginkit(item) }))
                     .toggleStyle(.switch).labelsHidden().controlSize(.small)
+                    .accessibilityLabel("\(item.title) enabled")
             }
             if let owner = item.payload["ownerPath"] ?? (item.payload["partOfApp"] == "1" ? item.url?.path : nil) {
                 Button { NSWorkspace.shared.activateFileViewerSelecting([URL(filePath: owner)]) } label: { Image(systemName: "magnifyingglass") }
-                    .buttonStyle(.borderless).help("Reveal in Finder")
+                    .buttonStyle(.borderless).help("Reveal in Finder").accessibilityLabel("Reveal \(item.title) in Finder")
             }
         }
     }

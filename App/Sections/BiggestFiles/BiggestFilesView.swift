@@ -91,7 +91,7 @@ struct BiggestFilesView: View {
                 }
                 .listStyle(.inset).scrollContentBackground(.hidden)
                 Divider()
-                HStack { Text("\(model.items.count) files ≥ \(model.minimumMB >= 1024 ? "\(model.minimumMB / 1024) GB" : "\(model.minimumMB) MB")").font(.caption).foregroundStyle(.secondary); Spacer() }.padding(8)
+                HStack { Text("\(countText(model.items.count, "file")) ≥ \(model.minimumMB >= 1024 ? "\(model.minimumMB / 1024) GB" : "\(model.minimumMB) MB")").font(.caption).foregroundStyle(.secondary); Spacer() }.padding(8)
             }
         } detail: {
             if let item = model.selected, let url = item.url {
@@ -119,7 +119,7 @@ struct BiggestFilesView: View {
             }
         } footer: {
             let items = model.selectedItems
-            if !items.isEmpty { Text("\(items.count) items · \(items.reduce(0) { $0 + $1.size }.formattedBytes)").font(.callout.monospacedDigit()).foregroundStyle(.secondary).padding(.trailing, 8) }
+            if !items.isEmpty { Text("\(countText(items.count, "item")) · \(items.reduce(0) { $0 + $1.size }.formattedBytes)").font(.callout.monospacedDigit()).foregroundStyle(.secondary).padding(.trailing, 8) }
             Button(AppSection.biggestFiles.actionTitle) { removalFlow = RemovalFlow(title: "Remove biggest files", apps: [], items: items) }
                 .buttonStyle(PrimaryActionButtonStyle()).disabled(items.isEmpty)
         }

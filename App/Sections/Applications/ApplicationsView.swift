@@ -28,7 +28,7 @@ struct ApplicationsView: View {
                     }
                     .padding(.trailing, 8)
                 } else if !model.selectedItems.isEmpty {
-                    Text("\(model.selectedItems.count) items · \(model.selectedSize.formattedBytes)")
+                    Text("\(countText(model.selectedItems.count, "item")) · \(model.selectedSize.formattedBytes)")
                         .font(.callout.monospacedDigit()).foregroundStyle(.secondary)
                         .padding(.trailing, 8)
                 }
@@ -46,7 +46,7 @@ struct ApplicationsView: View {
             } else {
                 let items = model.selectedRemainsItems
                 if !items.isEmpty {
-                    Text("\(items.count) items · \(items.reduce(0) { $0 + $1.size }.formattedBytes)")
+                    Text("\(countText(items.count, "item")) · \(items.reduce(0) { $0 + $1.size }.formattedBytes)")
                         .font(.callout.monospacedDigit()).foregroundStyle(.secondary)
                         .padding(.trailing, 8)
                 }
@@ -125,8 +125,11 @@ struct ApplicationsView: View {
         }
     }
 
+    /// Every dropped app is ticked for uninstalling, not just the first.
     private func handleDrop(_ providers: [NSItemProvider]) -> Bool {
+        var accepted = false
         for provider in providers where provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) {
+            accepted = true
             provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier) { item, _ in
                 guard let data = item as? Data, let url = URL(dataRepresentation: data, relativeTo: nil), url.pathExtension == "app" else { return }
                 Task { @MainActor in
@@ -142,9 +145,8 @@ struct ApplicationsView: View {
                     }
                 }
             }
-            return true
         }
-        return false
+        return accepted
     }
 }
 
@@ -248,13 +250,18 @@ extension AppListPane {
 }
 
 struct AppListRow: View {
+    static var unusedThresholdText: String {
+        let months = max(1, UserDefaults.standard.integer(forKey: SettingsKey.outdatedMonths))
+        return months == 12 ? "a year" : countText(months, "month")
+    }
+
     @Bindable var model: ApplicationsModel
     let app: InstalledApp
     var indented: Bool
 
     var body: some View {
         HStack(spacing: 8) {
-            TriStateCheckbox(state: model.checkedAppIDs.contains(app.id) ? .all : .none) {
+            TriStateCheckbox(state: model.checkedAppIDs.contains(app.id) ? .all : .none, title: app.name) {
                 model.setChecked(app, !model.checkedAppIDs.contains(app.id))
             }
             FileIcon(url: app.url, size: 28)
@@ -263,7 +270,7 @@ struct AppListRow: View {
                     Text(app.name).lineLimit(1)
                     if model.isUnused(app) {
                         Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(Theme.warning).font(.caption)
-                            .help("Not opened for more than 3 months")
+                            .help("Not opened for more than \(Self.unusedThresholdText)")
                     }
                 }
                 if let last = app.lastOpenedDate {
@@ -318,7 +325,7 @@ struct RemainsListPane: View {
                                     Text(group.title).lineLimit(1)
                                     ConfidenceBadge(raw: group.payload["confidence"])
                                 }
-                                Text(group.subtitle ?? "\(group.children.count) items").font(.caption).foregroundStyle(.secondary)
+                                Text(group.subtitle ?? "\(countText(group.children.count, "item"))").font(.caption).foregroundStyle(.secondary)
                             }
                             Spacer()
                             Text(group.size.formattedBytes).font(.callout.monospacedDigit())
@@ -366,7 +373,7 @@ struct RemainsDetailView: View {
                         Text(group.title).font(.title3.weight(.semibold))
                         ConfidenceBadge(raw: group.payload["confidence"])
                     }
-                    Text("\(group.children.count) items · \(group.size.formattedBytes)").foregroundStyle(.secondary)
+                    Text("\(countText(group.children.count, "item")) · \(group.size.formattedBytes)").foregroundStyle(.secondary)
                     Text(Array(Set(group.children.flatMap { $0.matchedBy.prefix(1) })).sorted().prefix(3).joined(separator: " · "))
                         .font(.caption).foregroundStyle(.tertiary).lineLimit(2)
                 }

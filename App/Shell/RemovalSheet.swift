@@ -35,7 +35,9 @@ struct RemovalSheet: View {
     private var includedItems: [ScanItem] { flow.items.filter { !excluded.contains($0.id) } }
     private var includedSize: Int64 { includedItems.reduce(0) { $0 + $1.size } }
     private var isRunning: Bool { if case .running = phase { return true } else { return false } }
-    private var runningApps: [InstalledApp] { flow.apps.filter { !ProcessMonitor.processes(inBundle: $0.url.standardizedFileURL.path).isEmpty } }
+    /// Apps with processes running from their bundle, and how many processes; read once when the sheet opens.
+    @State private var runningApps: [InstalledApp] = []
+    @State private var runningProcessCount = 0
     private var plan: RemovalPlan { RemovalPlan(selected: includedItems, permanently: permanently) }
     /// Deleting for good: either the user's choice or items that are already in a Trash.
     private var isDestructive: Bool { permanently || includedItems.contains { $0.payload["permanent"] == "1" } }
@@ -54,6 +56,14 @@ struct RemovalSheet: View {
         }
         .frame(width: 640, height: 560)
         .interactiveDismissDisabled(isRunning)
+        .task {
+            let apps = flow.apps
+            let found = await Task.detached(priority: .userInitiated) {
+                apps.map { ($0, ProcessMonitor.processes(inBundle: $0.url.standardizedFileURL.path).count) }.filter { $0.1 > 0 }
+            }.value
+            runningApps = found.map(\.0)
+            runningProcessCount = found.reduce(0) { $0 + $1.1 }
+        }
         .alert("Delete permanently?", isPresented: Binding(get: { confirmPermanentFor != nil }, set: { if !$0 { confirmPermanentFor = nil } })) {
             Button("Delete Permanently", role: .destructive) {
                 let items = confirmPermanentFor ?? []
@@ -101,7 +111,7 @@ struct RemovalSheet: View {
             }
             .listStyle(.inset)
             if !runningApps.isEmpty {
-                let processCount = runningApps.reduce(0) { $0 + ProcessMonitor.processes(inBundle: $1.url.standardizedFileURL.path).count }
+                let processCount = runningProcessCount
                 Label("\(runningApps.map(\.name).joined(separator: ", ")) \(runningApps.count == 1 ? "has" : "have") \(countText(processCount, "running process", plural: "running processes")) (app, helpers, background agents); they will be quit first. Unsaved changes in them may be lost.", systemImage: "power")
                     .font(.callout).foregroundStyle(.secondary)
             }

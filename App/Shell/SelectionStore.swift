@@ -35,6 +35,8 @@ final class SelectionStore {
         }
     }
 
+    func deselect(ids: Set<String>) { selectedLeafIDs.subtract(ids) }
+
     func deselect(in items: [ScanItem]) {
         for leaf in items.flatMap(\.leaves) { selectedLeafIDs.remove(leaf.id) }
     }
@@ -54,6 +56,8 @@ final class SelectionStore {
 struct TriStateCheckbox: View {
     let state: SelectionState
     var isEnabled = true
+    /// What the box selects, for VoiceOver ("Clean Caches"); the state is read as its value.
+    var title: String? = nil
     let action: () -> Void
 
     var body: some View {
@@ -65,7 +69,8 @@ struct TriStateCheckbox: View {
         .buttonStyle(.plain)
         .disabled(!isEnabled)
         .opacity(isEnabled ? 1 : 0.35)
-        .accessibilityLabel(state == .all ? "Selected" : state == .partial ? "Partially selected" : "Not selected")
+        .accessibilityLabel(title ?? "Select")
+        .accessibilityValue(state == .all ? "Selected" : state == .partial ? "Partially selected" : "Not selected")
     }
 
     private var symbol: String {

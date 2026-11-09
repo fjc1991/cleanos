@@ -27,7 +27,7 @@ struct OverviewView: View {
             BottomBar {
                 let items = model.cleanUp.selectedItems
                 if !items.isEmpty {
-                    Text("\(items.count) items · \(model.cleanUp.selectedSize.formattedBytes)").font(.callout.monospacedDigit()).foregroundStyle(.secondary).padding(.trailing, 8)
+                    Text("\(countText(items.count, "item")) · \(model.cleanUp.selectedSize.formattedBytes)").font(.callout.monospacedDigit()).foregroundStyle(.secondary).padding(.trailing, 8)
                 }
                 Button(AppSection.overview.actionTitle) {
                     removalFlow = RemovalFlow(title: "Clean Up", apps: [], items: items)
@@ -37,6 +37,7 @@ struct OverviewView: View {
             }
         }
         .task { model.cleanUp.appProvider = { await model.installedApps() }; await model.cleanUp.scanAll(volumes: model.volumes) }
+        .onChange(of: model.rescanToken) { _, _ in Task { await model.cleanUp.scanAll(volumes: model.volumes, force: true) } }
         .onReceive(Timer.publish(every: 5, on: .main, in: .common).autoconnect()) { _ in model.refreshMemory() }
         .sheet(item: $removalFlow) { flow in
             RemovalSheet(flow: flow) { result in model.cleanUp.finishedRemoval(result, volumes: model.volumes) }
@@ -142,13 +143,14 @@ private struct FastCleanupCard: View {
             if !model.cleanUp.results.isEmpty {
                 HStack(spacing: 14) {
                     ForEach(model.cleanUp.categories.filter { (model.cleanUp.results[$0.id]?.totalSize ?? 0) > 0 }) { category in
-                        LegendDot(color: Theme.categoryPalette[abs(category.id.hashValue) % Theme.categoryPalette.count], label: category.title,
+                        let index = model.cleanUp.categories.firstIndex(where: { $0.id == category.id }) ?? 0
+                        LegendDot(color: Theme.categoryPalette[index % Theme.categoryPalette.count], label: category.title,
                                   value: model.cleanUp.results[category.id]?.totalSize.formattedBytes ?? "")
                     }
                 }
                 .font(.caption)
             }
-            Text("Caches, logs, installers, Trash and other safe items are pre-selected. Review before cleaning.")
+            Text("Caches, logs, the Trash and other files apps recreate are pre-selected. Installers, screenshots and anything marked Caution are listed but left for you to choose.")
                 .font(.caption).foregroundStyle(.tertiary)
         }
         .frame(maxWidth: .infinity)

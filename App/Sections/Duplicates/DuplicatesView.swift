@@ -95,7 +95,7 @@ struct DuplicatesView: View {
                 List(selection: $model.selectedGroupID) {
                     ForEach(model.filtered) { group in
                         HStack(spacing: 8) {
-                            TriStateCheckbox(state: groupState(group)) {
+                            TriStateCheckbox(state: groupState(group), title: group.files.first?.title) {
                                 if groupState(group) == .none { for file in group.files.dropFirst() { model.selection.set(file, selected: true) } }
                                 else { model.selection.deselect(in: group.files) }
                             }
@@ -110,7 +110,7 @@ struct DuplicatesView: View {
                 }
                 .listStyle(.inset).scrollContentBackground(.hidden)
                 Divider()
-                HStack { Text("\(model.groups.count) groups · \(model.wasted.formattedBytes) recoverable").font(.caption).foregroundStyle(.secondary); Spacer() }.padding(8)
+                HStack { Text("\(countText(model.groups.count, "group")) · \(model.wasted.formattedBytes) recoverable").font(.caption).foregroundStyle(.secondary); Spacer() }.padding(8)
             }
         } detail: {
             if let group = model.selected {
@@ -151,7 +151,7 @@ struct DuplicatesView: View {
             }
         } footer: {
             let items = model.selectedItems
-            if !items.isEmpty { Text("\(items.count) items · \(items.reduce(0) { $0 + $1.size }.formattedBytes)").font(.callout.monospacedDigit()).foregroundStyle(.secondary).padding(.trailing, 8) }
+            if !items.isEmpty { Text("\(countText(items.count, "item")) · \(items.reduce(0) { $0 + $1.size }.formattedBytes)").font(.callout.monospacedDigit()).foregroundStyle(.secondary).padding(.trailing, 8) }
             Button(AppSection.duplicates.actionTitle) { removalFlow = RemovalFlow(title: "Remove duplicates", apps: [], items: items) }
                 .buttonStyle(PrimaryActionButtonStyle()).disabled(items.isEmpty)
         }

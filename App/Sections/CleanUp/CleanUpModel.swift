@@ -13,6 +13,8 @@ final class CleanUpModel {
     let selection = SelectionStore()
     let engine = CleanupEngine()
     var installedApps: [InstalledApp] = []
+    /// A forced rescan asked for while a scan was running; it runs as soon as that one ends.
+    private var rescanPending = false
 
     /// Which disks the per-volume categories (Bin, Purgeable space, External disk junk, installers) look at.
     enum Scope: Hashable { case allDisks, volume(String) }
@@ -31,8 +33,13 @@ final class CleanUpModel {
     func scopeTitle(volumes: [VolumeInfo]) -> String {
         switch scope {
         case .allDisks: return "All disks"
-        case .volume(let id): return volumes.first { $0.id == id }?.name ?? "All disks"
+        case .volume(let id): return volumes.first { $0.id == id }?.name ?? "Startup disk"
         }
+    }
+
+    /// External disks switched on in Settings → Locations; "All disks" means the startup disk plus these.
+    static var enabledVolumeIDs: Set<String> {
+        Set((try? JSONDecoder().decode([String].self, from: UserDefaults.standard.data(forKey: SettingsKey.enabledVolumeIDs) ?? Data())) ?? [])
     }
 
     var categories: [CleanupCategoryInfo] { CleanupEngine.categories }
@@ -47,10 +54,14 @@ final class CleanUpModel {
         let includeRoot: Bool
         switch scope {
         case .allDisks:
-            enabled = Set(volumes.filter { !$0.isRoot }.map(\.id))
+            enabled = Set(volumes.filter { !$0.isRoot && !$0.isReadOnly && Self.enabledVolumeIDs.contains($0.id) }.map(\.id))
             includeRoot = true
         case .volume(let id):
-            if let volume = volumes.first(where: { $0.id == id }), !volume.isRoot { enabled = [id]; includeRoot = false } else { enabled = []; includeRoot = true }
+            if let volume = volumes.first(where: { $0.id == id }), !volume.isRoot { enabled = [id]; includeRoot = false } else {
+                // The chosen disk is gone (or is the startup disk): say so in the picker by falling back explicitly.
+                if !volumes.contains(where: { $0.id == id }) { scope = .allDisks }
+                enabled = []; includeRoot = true
+            }
         }
         return CleanupContext(volumes: volumes, enabledVolumeIDs: enabled, installedApps: installedApps,
                               runningBundleIDs: Set(NSWorkspace.shared.runningApplications.compactMap(\.bundleIdentifier)), includeRootVolume: includeRoot)
@@ -58,7 +69,13 @@ final class CleanUpModel {
 
     /// Scans every category (three at a time) and selects the default items as results arrive.
     func scanAll(volumes: [VolumeInfo], force: Bool = false) async {
-        guard force || results.isEmpty, scanning.isEmpty else { return }
+        guard scanning.isEmpty else {
+            if force { rescanPending = true }
+            return
+        }
+        guard force || results.isEmpty else { return }
+        // Items the user unticked stay unticked after a rescan.
+        let unticked = Set(allItems.flatMap(\.leaves).filter { $0.tier.isSelectableByDefault && !selection.isSelected($0) }.map(\.id))
         if force { for result in results.values { selection.deselect(in: result.items) }; results.removeAll() }
         let context = await makeContext(volumes: volumes)
         let ids = categories.map(\.id)
@@ -77,12 +94,17 @@ final class CleanUpModel {
                 if let result {
                     results[id] = result
                     selection.selectDefaults(in: result.items, allowRoot: false)
+                    selection.deselect(ids: unticked)
                 }
                 scanning.remove(id)
                 if !addNext() { running -= 1 }
             }
         }
         lastScan = .now
+        if rescanPending {
+            rescanPending = false
+            await scanAll(volumes: volumes, force: true)
+        }
     }
 
     func rescan(categoryID: String, volumes: [VolumeInfo]) async {

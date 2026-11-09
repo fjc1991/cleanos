@@ -45,7 +45,7 @@ struct GroupLabel: View {
     let selection: SelectionStore
     var body: some View {
         HStack(spacing: 8) {
-            TriStateCheckbox(state: selection.state(of: item), isEnabled: item.leaves.contains { $0.tier.isSelectable }) { selection.toggle(item) }
+            TriStateCheckbox(state: selection.state(of: item), isEnabled: item.leaves.contains { $0.tier.isSelectable }, title: item.title) { selection.toggle(item) }
             if let iconPath = item.payload["iconPath"] {
                 FileIcon(url: URL(filePath: iconPath), size: 20)
             }
@@ -54,7 +54,7 @@ struct GroupLabel: View {
                 if let subtitle = item.subtitle { Text(subtitle).font(.caption).foregroundStyle(.secondary) }
             }
             Spacer()
-            Text(item.leaves.count == 1 ? "1 item" : "\(item.leaves.count) items").font(.caption).foregroundStyle(.secondary)
+            Text(item.leaves.count == 1 ? "1 item" : "\(countText(item.leaves.count, "item"))").font(.caption).foregroundStyle(.secondary)
             Text(item.size.formattedBytes).font(.caption.monospacedDigit()).foregroundStyle(.secondary).frame(width: 80, alignment: .trailing)
         }
     }

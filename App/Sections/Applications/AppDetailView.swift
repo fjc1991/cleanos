@@ -6,8 +6,15 @@ struct AppDetailView: View {
     @Bindable var model: ApplicationsModel
     let app: InstalledApp
     var onReset: () -> Void
+    /// Processes running from inside the bundle, read off the main thread when the app is shown.
+    @State private var background: [RunningProcess] = []
 
     private var result: LeftoverScanResult? { model.scans[app.id] }
+
+    private func refreshProcesses() async {
+        let path = app.url.standardizedFileURL.path
+        background = await Task.detached(priority: .utility) { ProcessMonitor.processes(inBundle: path) }.value
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -18,6 +25,7 @@ struct AppDetailView: View {
             } else {
                 generalInfo
             }
+            EmptyView().task(id: app.id) { await refreshProcesses() }
         }
         .task(id: app.id) { await model.ensureScan(for: app) }
     }
@@ -56,12 +64,11 @@ struct AppDetailView: View {
             Spacer()
             VStack(alignment: .trailing, spacing: 6) {
                 Text((result?.totalSize ?? model.appSizes[app.id] ?? 0).formattedBytes).font(.title3.weight(.semibold).monospacedDigit())
-                let background = model.backgroundProcesses(of: app)
                 if !background.isEmpty {
                     HStack(spacing: 6) {
                         Label(model.isRunning(app) ? "Running" : "\(background.count) background process\(background.count == 1 ? "" : "es")", systemImage: "circle.fill")
                             .font(.caption).foregroundStyle(Theme.success)
-                        Button("Force Stop") { Task { _ = await model.quit([app]) } }.controlSize(.mini)
+                        Button("Force Stop") { Task { _ = await model.quit([app]); await refreshProcesses() } }.controlSize(.mini)
                             .help(background.map { "\($0.name) (pid \($0.pid))" }.joined(separator: "\n"))
                     }
                 }
@@ -218,10 +225,10 @@ struct ExpertTreeView: View {
                             }
                         } label: {
                             HStack(spacing: 8) {
-                                TriStateCheckbox(state: model.selection.state(of: group)) { model.selection.toggle(group) }
+                                TriStateCheckbox(state: model.selection.state(of: group), title: group.title) { model.selection.toggle(group) }
                                 Text(group.title).font(.callout.weight(.semibold))
                                 Spacer()
-                                Text(group.children.count == 1 ? "1 item" : "\(group.children.count) items").font(.caption).foregroundStyle(.secondary)
+                                Text(group.children.count == 1 ? "1 item" : "\(countText(group.children.count, "item"))").font(.caption).foregroundStyle(.secondary)
                                 Text(group.size.formattedBytes).font(.caption.monospacedDigit()).foregroundStyle(.secondary).frame(width: 80, alignment: .trailing)
                             }
                         }
@@ -255,7 +262,7 @@ struct ScanItemRow: View {
 
     var body: some View {
         HStack(spacing: 8) {
-            TriStateCheckbox(state: selection.state(of: item), isEnabled: item.tier.isSelectable) { selection.toggle(item) }
+            TriStateCheckbox(state: selection.state(of: item), isEnabled: item.tier.isSelectable, title: item.title) { selection.toggle(item) }
             if item.kind == .registration {
                 Image(systemName: "text.alignleft").frame(width: 18).foregroundStyle(Theme.accent)
             } else {

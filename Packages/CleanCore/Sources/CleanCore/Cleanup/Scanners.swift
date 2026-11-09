@@ -290,7 +290,7 @@ public struct XcodeJunkScanner: CleanupScanner {
 // MARK: - Bin (Trash of every volume)
 
 public struct TrashScanner: CleanupScanner {
-    public let info = CleanupCategoryInfo(id: "trash", title: "Bin",
+    public let info = CleanupCategoryInfo(id: "trash", title: "Trash",
         description: "Items in the Trash of the startup disk and of every enabled external disk. Emptying the Trash deletes them permanently.",
         systemImage: "trash", tier: .safe, isPerVolume: true)
     public init() {}

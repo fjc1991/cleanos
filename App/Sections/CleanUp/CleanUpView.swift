@@ -19,7 +19,7 @@ struct CleanUpView: View {
             } label: { Text("Disk") }
             .pickerStyle(.menu)
             .fixedSize()
-            .help("Which disks the Bin, Purgeable space, External disk junk and Installation files categories look at")
+            .help("Which disks the Trash, Purgeable space, External disk junk and Installation files categories look at")
             if model.isScanning {
                 HStack(spacing: 8) { ProgressView().controlSize(.small); Text("Scanning…").font(.callout).foregroundStyle(.secondary) }
             } else {
@@ -33,7 +33,7 @@ struct CleanUpView: View {
                             Image(systemName: "lock.shield").foregroundStyle(Theme.warning)
                             VStack(alignment: .leading, spacing: 4) {
                                 Text("Full Disk Access is off").font(.callout.weight(.semibold))
-                                Text("The Bin, Mail attachments, Safari caches and hidden folders on external disks can't be read until you allow it.")
+                                Text("The Trash, Mail attachments, Safari caches and hidden folders on external disks can't be read until you allow it.")
                                     .font(.caption).foregroundStyle(.secondary)
                                 Button("Allow in System Settings") { NSWorkspace.shared.open(FullDiskAccess.settingsURL) }.font(.caption)
                             }
@@ -44,7 +44,7 @@ struct CleanUpView: View {
                     }
                     ForEach(model.categories) { category in
                         HStack(spacing: 10) {
-                            TriStateCheckbox(state: model.state(for: category), isEnabled: model.results[category.id] != nil) { model.toggle(category: category) }
+                            TriStateCheckbox(state: model.state(for: category), isEnabled: model.results[category.id] != nil, title: "Clean \(category.title)") { model.toggle(category: category) }
                             Image(systemName: category.systemImage).frame(width: 22).foregroundStyle(Theme.accent)
                             Text(category.title)
                             Spacer()
@@ -59,6 +59,8 @@ struct CleanUpView: View {
                         .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(model.selectedCategoryID == category.id ? Theme.accent.opacity(0.18) : .clear))
                         .contentShape(Rectangle())
                         .onTapGesture { model.selectedCategoryID = category.id }
+                        .accessibilityElement(children: .contain)
+                        .accessibilityAction(named: "Show \(category.title)") { model.selectedCategoryID = category.id }
                     }
                 }
                 .padding(8)
@@ -71,7 +73,7 @@ struct CleanUpView: View {
             }
         } footer: {
             if !model.selectedItems.isEmpty {
-                Text("\(model.selectedItems.count) items · \(model.selectedSize.formattedBytes)")
+                Text("\(countText(model.selectedItems.count, "item")) · \(model.selectedSize.formattedBytes)")
                     .font(.callout.monospacedDigit()).foregroundStyle(.secondary).padding(.trailing, 8)
             }
             Button(AppSection.cleanUp.actionTitle) {

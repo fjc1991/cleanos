@@ -150,12 +150,14 @@ public actor ExtensionsScanner {
             guard let json = Self.readJSON(profile.appending(path: "extensions.json")), let addons = json["addons"] as? [[String: Any]] else { continue }
             for addon in addons where (addon["location"] as? String) == "app-profile" {
                 let locale = addon["defaultLocale"] as? [String: Any]
-                let path = addon["path"] as? String ?? ""
+                // Only add-ons stored inside this profile can be removed from here.
+                guard let path = addon["path"] as? String, !path.isEmpty, path.hasPrefix(profile.path + "/"),
+                      FileManager.default.fileExists(atPath: path) else { continue }
                 let url = URL(filePath: path)
                 firefoxItems.append(ScanItem(url: url, title: locale?["name"] as? String ?? addon["id"] as? String ?? "Extension",
                                              subtitle: "\((addon["active"] as? Bool ?? false) ? "Enabled" : "Disabled") · \(addon["version"] as? String ?? "") · \(profile.lastPathComponent)",
                                              kind: .file, group: "Firefox", size: DirectorySizer.size(of: url).bytes, tier: .caution,
-                                             matchedBy: ["Firefox extensions.json"], payload: ["type": "firefoxExtension", "extensionID": addon["id"] as? String ?? ""]))
+                                             matchedBy: ["Firefox extensions.json"], payload: ["type": "firefoxExtension", "browser": "org.mozilla.firefox", "extensionID": addon["id"] as? String ?? ""]))
             }
         }
         if !firefoxItems.isEmpty {
@@ -221,7 +223,8 @@ public actor ExtensionsScanner {
 public enum PluginkitController {
     public static func setEnabled(identifier: String, _ enabled: Bool) -> String? {
         if FileRemover.isDryRun { return nil }
-        let output = SystemRegistrationReader.run("/usr/bin/pluginkit", ["-e", enabled ? "use" : "ignore", "-i", identifier]) ?? ""
-        return output.isEmpty ? nil : output
+        let result = SystemRegistrationReader.runChecked("/usr/bin/pluginkit", ["-e", enabled ? "use" : "ignore", "-i", identifier])
+        let message = (result.stderr + result.stdout).trimmingCharacters(in: .whitespacesAndNewlines)
+        return result.status == 0 && message.isEmpty ? nil : (message.isEmpty ? "pluginkit failed (\(result.status))." : message)
     }
 }

@@ -75,7 +75,7 @@ struct StartupView: View {
                 }
                 Divider()
                 HStack {
-                    Text("\(model.items.count) items").font(.caption).foregroundStyle(.secondary)
+                    Text("\(countText(model.items.count, "item"))").font(.caption).foregroundStyle(.secondary)
                     Spacer()
                     Button("Rescan") { Task { await model.load(force: true) } }.buttonStyle(.link).font(.caption)
                 }

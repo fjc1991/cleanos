@@ -68,11 +68,4 @@ final class SupportPromptModel {
         defaults.set(true, forKey: SettingsKey.supportPromptDisabled)
         isPromptVisible = false
     }
-
-    /// Re-enables the nudge (Settings → About).
-    func reset() {
-        defaults.removeObject(forKey: SettingsKey.supportPromptDisabled)
-        defaults.removeObject(forKey: SettingsKey.supportPromptLastShown)
-        isPromptVisible = shouldPrompt
-    }
 }

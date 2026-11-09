@@ -3,6 +3,7 @@ import CleanCore
 
 /// Every removal session with its entries; items that are still in the Trash can be put back.
 struct HistoryView: View {
+    @State private var pendingDelete: JournalSession?
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
     @State private var sessions: [JournalSession] = []
@@ -27,7 +28,7 @@ struct HistoryView: View {
                     ForEach(sessions) { session in
                         VStack(alignment: .leading, spacing: 2) {
                             Text(session.title).lineLimit(1)
-                            Text("\(session.startedAt.formatted(.dateTime.day().month().year().hour().minute())) · \(session.entries.filter { $0.action != .restored }.count) items · \(session.totalBytes.formattedBytes)")
+                            Text("\(session.startedAt.formatted(.dateTime.day().month().year().hour().minute())) · \(countText(session.entries.filter { $0.action != .restored }.count, "item")) · \(session.totalBytes.formattedBytes)")
                                 .font(.caption).foregroundStyle(.secondary)
                             if !session.restorableEntries.isEmpty {
                                 Text("\(session.restorableEntries.count) restorable").font(.caption2).foregroundStyle(Theme.success)
@@ -43,7 +44,7 @@ struct HistoryView: View {
                             Text(session.title).font(.headline)
                             Spacer()
                             Button("Restore All Restorable") { Task { await restore(session: session) } }.disabled(session.restorableEntries.isEmpty || busy)
-                            Button("Delete Record", role: .destructive) { Task { await deleteRecord(session) } }
+                            Button("Delete Record", role: .destructive) { pendingDelete = session }
                         }
                         .padding(12)
                         Divider()
@@ -81,6 +82,16 @@ struct HistoryView: View {
         }
         .frame(width: 760, height: 480)
         .task { await reload() }
+        .confirmationDialog("Delete this record from History?", isPresented: Binding(get: { pendingDelete != nil }, set: { if !$0 { pendingDelete = nil } })) {
+            Button("Delete Record", role: .destructive) {
+                if let session = pendingDelete { Task { await deleteRecord(session) } }
+                pendingDelete = nil
+            }
+        } message: {
+            Text((pendingDelete?.restorableEntries.isEmpty ?? true)
+                 ? "The removed items are not affected."
+                 : "CleanOS will no longer be able to put its items back; they stay in the Trash, where Finder's Put Back may still work.")
+        }
     }
 
     private func reload() async {

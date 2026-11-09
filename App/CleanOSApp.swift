@@ -42,8 +42,13 @@ struct CleanOSApp: App {
             CommandMenu("Scan") {
                 Button("Rescan") { model.rescanEverything() }.keyboardShortcut("r", modifiers: .command)
                 Divider()
-                ForEach(AppSection.allCases) { section in
-                    Button(section.title) { model.selectedSection = section }
+                ForEach(Array(AppSection.allCases.enumerated()), id: \.element) { index, section in
+                    if index < 9 {
+                        Button(section.title) { model.selectedSection = section }
+                            .keyboardShortcut(KeyEquivalent(Character(String(index + 1))), modifiers: .command)
+                    } else {
+                        Button(section.title) { model.selectedSection = section }
+                    }
                 }
             }
         }
