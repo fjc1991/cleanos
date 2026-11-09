@@ -42,11 +42,27 @@ public struct AppIdentity: Hashable, Sendable, Codable {
         return nil
     }
 
-    /// First two components of the bundle ID (`com.microsoft`), used for pkg receipts and plug-in IDs from the same vendor.
-    public var vendorPrefix: String? {
-        let parts = bundleID.split(separator: ".")
+    /// The developer's namespace in the bundle ID (`com.microsoft`), used for pkg receipts and plug-in IDs from the same vendor.
+    public var vendorPrefix: String? { Self.vendorPrefix(of: bundleID) }
+
+    /// Two-segment namespaces that belong to a hosting service or public suffix, not to one developer
+    /// (`io.github.alice.Tool` and `io.github.bob.Other` are unrelated).
+    public static let hostingNamespaces: Set<String> = [
+        "io.github", "com.github", "org.github", "io.gitlab", "com.gitlab", "org.gitlab", "org.sourceforge", "net.sourceforge", "com.sourceforge",
+        "com.googlecode", "org.bitbucket", "io.bitbucket", "com.bitbucket", "org.codeberg", "page.codeberg", "io.codeberg", "com.gitee", "io.gitee",
+        "app.netlify", "com.herokuapp", "app.vercel", "io.readthedocs", "com.blogspot", "io.itch", "dev.pages",
+        // Reversed public suffixes (`uk.co.example.App`): the developer is the third segment.
+        "uk.co", "uk.org", "au.com", "au.net", "jp.co", "kr.co", "cn.com", "br.com", "nz.co", "in.co", "tw.com", "hk.com", "sg.com", "za.co",
+    ]
+
+    /// `com.microsoft.Word` → `com.microsoft`; `io.github.alice.Tool` → `io.github.alice` (hosting namespaces need a third segment);
+    /// nil when the identifier is too short to name a developer.
+    public static func vendorPrefix(of bundleID: String) -> String? {
+        let parts = bundleID.lowercased().split(separator: ".").map(String.init)
         guard parts.count >= 3 else { return nil }
-        return parts.prefix(2).joined(separator: ".").lowercased()
+        let two = parts.prefix(2).joined(separator: ".")
+        guard hostingNamespaces.contains(two) else { return two }
+        return parts.count >= 4 ? parts.prefix(3).joined(separator: ".") : nil
     }
 
     public init(bundleID: String, name: String, bundleName: String? = nil, fileName: String, executable: String? = nil,
@@ -119,18 +135,27 @@ public enum AppInspector {
         return nil
     }
 
+    /// `com.nektony.App` → `nektony`; `io.github.alice.Tool` → `alice`; nil for generic or hosting namespaces without a developer segment.
     static func vendorSegment(of bundleID: String) -> String? {
         let parts = bundleID.split(separator: ".").map(String.init)
         guard parts.count >= 3 else { return nil }
-        let vendor = parts[1]
+        var vendor = parts[1]
+        if AppIdentity.hostingNamespaces.contains(parts.prefix(2).joined(separator: ".").lowercased()) {
+            guard parts.count >= 4 else { return nil }
+            vendor = parts[2]
+        }
         return genericVendors.contains(vendor.lowercased()) ? nil : vendor
     }
+
+    /// Nested code whose entitlements can name app groups of its own (share extensions, login-item helpers, XPC services).
+    static let entitlementBundleExtensions: Set<String> = ["app", "appex", "xpc", "systemextension"]
 
     static func scanNestedBundles(in bundleURL: URL, shared: SharedIdentifiers, identity: inout AppIdentity) {
         let keys: [URLResourceKey] = [.isDirectoryKey, .nameKey]
         guard let enumerator = FileManager.default.enumerator(at: bundleURL, includingPropertiesForKeys: keys,
                                                               options: [.skipsHiddenFiles], errorHandler: { _, _ in true }) else { return }
         var found = 0
+        var entitlementReads = 0
         for case let url as URL in enumerator {
             if enumerator.level > 10 { enumerator.skipDescendants(); continue }
             let ext = url.pathExtension.lowercased()
@@ -145,8 +170,32 @@ public enum AppInspector {
             if ext == "app", let privileged = info["SMPrivilegedExecutables"] as? [String: Any] {
                 identity.launchdLabels.formUnion(privileged.keys)
             }
+            // App groups a helper or extension declares belong to the app as well.
+            if entitlementBundleExtensions.contains(ext), entitlementReads < 40 {
+                entitlementReads += 1
+                if let entitlements = signingInformation(at: url)?[kSecCodeInfoEntitlementsDict as String] as? [String: Any],
+                   let groups = entitlements["com.apple.security.application-groups"] as? [String] {
+                    identity.groupIDs.formUnion(groups)
+                }
+            }
             if ext == "framework" { enumerator.skipDescendants() }
         }
+    }
+
+    /// The code signature's information dictionary (team, certificates, entitlements), read without validating anything.
+    static func signingInformation(at url: URL) -> [String: Any]? {
+        var staticCode: SecStaticCode?
+        guard SecStaticCodeCreateWithPath(url as CFURL, [], &staticCode) == errSecSuccess, let staticCode else { return nil }
+        var info: CFDictionary?
+        let flags = SecCSFlags(rawValue: kSecCSSigningInformation | kSecCSRequirementInformation)
+        guard SecCodeCopySigningInformation(staticCode, flags, &info) == errSecSuccess else { return nil }
+        return info as? [String: Any]
+    }
+
+    /// The Team ID that signed the bundle or file at `url`; nil when it is unsigned, ad hoc signed or unreadable.
+    public static func signingTeamID(at url: URL) -> String? {
+        guard let team = signingInformation(at: url)?[kSecCodeInfoTeamIdentifier as String] as? String, !team.isEmpty else { return nil }
+        return team
     }
 
     static func scanLaunchdPlists(in bundleURL: URL, identity: inout AppIdentity) {
@@ -189,7 +238,9 @@ public enum AppInspector {
         }
         var requirement: SecRequirement?
         if SecRequirementCreateWithString("anchor apple generic and notarized" as CFString, [], &requirement) == errSecSuccess, let requirement {
-            identity.isNotarized = SecStaticCodeCheckValidity(staticCode, [], requirement) == errSecSuccess
+            // Checks the signature and the requirement only; hashing every resource of every app would make the catalog scan slow.
+            let validation = SecCSFlags(rawValue: kSecCSBasicValidateOnly)
+            identity.isNotarized = SecStaticCodeCheckValidity(staticCode, validation, requirement) == errSecSuccess
         }
     }
 
