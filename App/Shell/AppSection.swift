@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// Sidebar entries. Merges MacCleaner Pro's sections with App Cleaner's tabs.
+/// Sidebar entries, in display order.
 enum AppSection: String, CaseIterable, Identifiable, Codable {
     case overview, cleanUp, speedUp, manageFiles
     case applications, startup, extensions, updates

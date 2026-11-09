@@ -1,14 +1,16 @@
-# Builds, signs, notarizes and publishes a release whenever a version tag (v1.2.3) is pushed.
+# Builds, signs and publishes a release whenever a version tag (v1.2.3) is pushed.
 #
 # Repository secrets (Settings → Secrets and variables → Actions):
-#   MACOS_CERTIFICATE_P12       base64 of the "Developer ID Application" certificate exported as .p12
-#   MACOS_CERTIFICATE_PASSWORD  password chosen when exporting the .p12
-#   APPLE_TEAM_ID               10-character team identifier
-#   APPLE_ID                    Apple ID used for notarization
-#   APPLE_APP_PASSWORD          app-specific password for that Apple ID (appleid.apple.com)
-#   SPARKLE_PRIVATE_KEY         the update-signing key; `Scripts/sparkle-keys.sh github` stores it for you
-# Repository variable: KOFI_NAME (the ko-fi.com/<name> page). Without the certificate secrets the DMG is
-# ad-hoc signed and marked as such in the release notes.
+#   SPARKLE_PRIVATE_KEY           the update-signing key; `Scripts/sparkle-keys.sh github` stores it (required)
+#   CLEANOS_CERTIFICATE_P12       the project's self-signed signing certificate; `Scripts/signing-cert.sh github`
+#   CLEANOS_CERTIFICATE_PASSWORD  stores both. Gives every release the same identity.
+#   Later, with a paid Apple Developer account (preferred over the certificate above when present):
+#   MACOS_CERTIFICATE_P12         base64 of the "Developer ID Application" certificate exported as .p12
+#   MACOS_CERTIFICATE_PASSWORD    password chosen when exporting the .p12
+#   APPLE_TEAM_ID                 10-character team identifier
+#   APPLE_ID                      Apple ID used for notarization
+#   APPLE_APP_PASSWORD            app-specific password for that Apple ID (appleid.apple.com)
+# Repository variable: KOFI_NAME (the ko-fi.com/<name> page). Each secret is only given to the step that needs it.
 name: Release
 
 on:
@@ -21,21 +23,17 @@ permissions:
 
 jobs:
   release:
-    name: Build, notarize and publish
-    runs-on: macos-latest
-    env:
-      MACOS_CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
-      MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
-      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-      APPLE_ID: ${{ secrets.APPLE_ID }}
-      APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
-      SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
-      KEYCHAIN_PASSWORD: ${{ github.run_id }}
+    name: Build, sign and publish
+    runs-on: macos-26
     steps:
       - uses: actions/checkout@v5
-      - uses: maxim-lobanov/setup-xcode@v1
-        with:
-          xcode-version: latest-stable
+
+      - name: Select Xcode
+        run: |
+          # Pinned so a runner image update cannot change the compiler under a release; falls back to the default.
+          if [[ -d /Applications/Xcode_26.6.app ]]; then sudo xcode-select -s /Applications/Xcode_26.6.app; fi
+          xcodebuild -version
+
       - name: Install XcodeGen
         run: brew install xcodegen
 
@@ -48,30 +46,51 @@ jobs:
           fi
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
 
-      - name: Import Developer ID certificate
-        if: env.MACOS_CERTIFICATE_P12 != ''
+      - name: Import signing certificate
+        env:
+          MACOS_CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          CLEANOS_CERTIFICATE_P12: ${{ secrets.CLEANOS_CERTIFICATE_P12 }}
+          CLEANOS_CERTIFICATE_PASSWORD: ${{ secrets.CLEANOS_CERTIFICATE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
+          if [[ -n "$MACOS_CERTIFICATE_P12" ]]; then
+            P12="$MACOS_CERTIFICATE_P12"; PASSWORD="$MACOS_CERTIFICATE_PASSWORD"; NAME="Developer ID Application"
+            echo "TEAM_ID=$APPLE_TEAM_ID" >> "$GITHUB_ENV"
+          elif [[ -n "$CLEANOS_CERTIFICATE_P12" ]]; then
+            P12="$CLEANOS_CERTIFICATE_P12"; PASSWORD="$CLEANOS_CERTIFICATE_PASSWORD"; NAME="CleanOS Code Signing"
+          else
+            echo "::warning::No signing certificate is configured, so this release is ad hoc signed and users lose permissions on every update. Run Scripts/signing-cert.sh."
+            exit 0
+          fi
           KEYCHAIN="$RUNNER_TEMP/release.keychain-db"
+          KEYCHAIN_PASSWORD="$(uuidgen)"
           security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
           security set-keychain-settings -lut 21600 "$KEYCHAIN"
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
-          echo "$MACOS_CERTIFICATE_P12" | base64 --decode > "$RUNNER_TEMP/certificate.p12"
-          security import "$RUNNER_TEMP/certificate.p12" -P "$MACOS_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN"
-          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
-          security list-keychains -d user -s "$KEYCHAIN" login.keychain-db
-          IDENTITY="$(security find-identity -v -p codesigning "$KEYCHAIN" | grep 'Developer ID Application' | head -1 | sed 's/.*"\(.*\)".*/\1/')"
-          [[ -n "$IDENTITY" ]] || { echo "No Developer ID Application identity in the certificate"; exit 1; }
-          echo "CODESIGN_IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
-          echo "TEAM_ID=$APPLE_TEAM_ID" >> "$GITHUB_ENV"
+          printf '%s' "$P12" | base64 --decode > "$RUNNER_TEMP/certificate.p12"
+          security import "$RUNNER_TEMP/certificate.p12" -P "$PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN"
           rm "$RUNNER_TEMP/certificate.p12"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" >/dev/null
+          security list-keychains -d user -s "$KEYCHAIN" login.keychain-db
+          # The self-signed certificate is not trusted by the system, so list every identity, not only valid ones.
+          IDENTITY="$(security find-identity -p codesigning "$KEYCHAIN" | grep "\"$NAME" | head -1 | sed 's/.*"\(.*\)".*/\1/')"
+          [[ -n "$IDENTITY" ]] || { echo "No \"$NAME\" identity in the certificate"; exit 1; }
+          echo "CODESIGN_IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
 
       - name: Store notarization credentials
-        if: env.MACOS_CERTIFICATE_P12 != '' && env.APPLE_ID != ''
+        if: env.TEAM_ID != ''
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
         run: |
-          xcrun notarytool store-credentials "ci" --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD"
+          [[ -n "$APPLE_ID" ]] || exit 0
+          xcrun notarytool store-credentials "ci" --apple-id "$APPLE_ID" --team-id "$TEAM_ID" --password "$APPLE_APP_PASSWORD"
           echo "NOTARY_PROFILE=ci" >> "$GITHUB_ENV"
 
       - name: Prepare Sparkle signing key
+        env:
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
         run: |
           if [[ -z "$SPARKLE_PRIVATE_KEY" ]]; then
             echo "SPARKLE_PRIVATE_KEY secret is missing; the appcast cannot be signed."; exit 1
@@ -79,26 +98,30 @@ jobs:
           printf '%s' "$SPARKLE_PRIVATE_KEY" > "$RUNNER_TEMP/sparkle.key"
           echo "SPARKLE_PRIVATE_KEY_FILE=$RUNNER_TEMP/sparkle.key" >> "$GITHUB_ENV"
 
-      - name: Build, sign, notarize and write the appcast
+      - name: Build, sign and write the appcast
         env:
           GITHUB_REPO: ${{ github.repository }}
           KOFI_NAME: ${{ vars.KOFI_NAME }}
         run: Scripts/release.sh
 
+      - name: Remove the signing material
+        if: always()
+        run: rm -f "$RUNNER_TEMP/sparkle.key" "$RUNNER_TEMP/release.keychain-db"
+
       - name: Release notes footer
         run: |
-          if [[ -z "${CODESIGN_IDENTITY:-}" ]]; then
-            cat > "$RUNNER_TEMP/footer.md" <<'MD'
+          case "${CODESIGN_IDENTITY:-}" in
+            "Developer ID"*)
+              printf '\nSigned with Developer ID and notarized by Apple. CleanOS updates itself from this release.\n' > "$RUNNER_TEMP/footer.md";;
+            *)
+              cat > "$RUNNER_TEMP/footer.md" <<'MD'
 
-          > **Unsigned preview build.** This DMG is ad-hoc signed because no Developer ID certificate is configured,
-          > so macOS blocks it on first launch. To try it anyway, open it once, then go to System Settings →
-          > Privacy & Security and click **Open Anyway**, or run
-          > `xattr -dr com.apple.quarantine /Applications/CleanOS.app`.
-          > The privileged helper (root-only clean-ups) may be refused in unsigned builds.
+          > **Not notarized by Apple.** CleanOS is signed with the project's own certificate, not an Apple Developer ID,
+          > so macOS blocks it on first launch. Open it once, then go to System Settings → Privacy & Security and click
+          > **Open Anyway**. After that it opens normally and updates itself from GitHub releases.
           MD
-          else
-            printf '\nSigned with Developer ID and notarized by Apple. CleanOS updates itself from this release.\n' > "$RUNNER_TEMP/footer.md"
-          fi
+              ;;
+          esac
 
       # A manual run (workflow_dispatch) creates the tag v<version> at the commit it ran on; a re-run after a
       # partial failure replaces the files of the release that already exists.

@@ -1,9 +1,15 @@
 #!/bin/zsh
-# Builds a Release CleanOS.app, signs it with a Developer ID identity when one is configured, packages a DMG,
-# notarizes + staples it (optional) and writes the signed Sparkle appcast the app's updater reads.
+# Builds a Release CleanOS.app, signs it, packages a DMG, notarizes + staples it (Developer ID only) and writes the
+# signed Sparkle appcast the app's updater reads.
+#
+# Signing identities, best first:
+#   "Developer ID Application: Name (TEAMID)"   notarized, opens without warnings
+#   "CleanOS Code Signing"                      the project's self-signed certificate (Scripts/signing-cert.sh): a
+#                                               stable identity, so permissions survive updates; "Open Anyway" once
+#   "-"                                         ad hoc: a new identity every build; for local testing only
 #
 # Environment:
-#   CODESIGN_IDENTITY         "Developer ID Application: Name (TEAMID)"   default: "-" (ad hoc: runs only on this Mac)
+#   CODESIGN_IDENTITY         one of the identities above                 default: "-"
 #   TEAM_ID                   10-character team identifier                default: empty
 #   NOTARY_PROFILE            profile from `xcrun notarytool store-credentials`; notarization is skipped when empty
 #   GITHUB_REPO               owner/CleanOS                               default: parsed from `git remote get-url origin`
@@ -60,11 +66,12 @@ if [[ "${SKIP_TESTS:-0}" != "1" ]]; then
 fi
 
 echo "▸ Building Release"
+# Built ad hoc, then every component is re-signed with the real identity below (Xcode may not accept a self-signed one).
 # Judge the build by xcodebuild's own exit status: an app left over from an earlier build must never be packaged.
 BUILD_LOG="build/release-build.log"
 mkdir -p build
 if ! xcodebuild -project CleanOS.xcodeproj -scheme CleanOS -configuration Release -derivedDataPath "$OUT" \
-  CODE_SIGN_IDENTITY="$IDENTITY" DEVELOPMENT_TEAM="$TEAM" \
+  CODE_SIGN_IDENTITY="-" DEVELOPMENT_TEAM="" \
   CLEANOS_GITHUB_REPO="$GITHUB_REPO" CLEANOS_KOFI_NAME="$KOFI" build > "$BUILD_LOG" 2>&1; then
   grep -E "error:|BUILD FAILED" "$BUILD_LOG" || tail -40 "$BUILD_LOG"
   echo "✗ build failed (full log: $BUILD_LOG)" >&2
@@ -85,32 +92,45 @@ if [[ "$PUBKEY" == *PLACEHOLDER* || -z "$PUBKEY" ]]; then
 fi
 echo "▸ Update feed: $FEED"
 
-if [[ "$IDENTITY" != "-" ]]; then
-  echo "▸ Signing nested components inside-out with hardened runtime"
-  SPARKLE="$APP/Contents/Frameworks/Sparkle.framework"
-  if [[ -d "$SPARKLE" ]]; then
-    codesign --force --options runtime --timestamp --sign "$IDENTITY" "$SPARKLE/Versions/B/XPCServices/Installer.xpc"
-    codesign --force --options runtime --timestamp --sign "$IDENTITY" --preserve-metadata=entitlements "$SPARKLE/Versions/B/XPCServices/Downloader.xpc"
-    codesign --force --options runtime --timestamp --sign "$IDENTITY" "$SPARKLE/Versions/B/Autoupdate"
-    codesign --force --options runtime --timestamp --sign "$IDENTITY" "$SPARKLE/Versions/B/Updater.app"
-    codesign --force --options runtime --timestamp --sign "$IDENTITY" "$SPARKLE"
-  fi
-  codesign --force --options runtime --timestamp --sign "$IDENTITY" "$APP/Contents/MacOS/com.cleanos.helper"
-  codesign --force --options runtime --timestamp --sign "$IDENTITY" "$APP/Contents/Library/LoginItems/CleanOS Trash Watcher.app"
-  codesign --force --options runtime --timestamp --sign "$IDENTITY" --entitlements App/CleanOS.entitlements "$APP"
-  codesign --verify --deep --strict --verbose=2 "$APP"
+# Sign inside-out with the hardened runtime. Everything is re-signed, including the helper and the Trash Watcher,
+# so the get-task-allow entitlement Xcode adds to development signatures never ships in a root daemon.
+ENTITLEMENTS="App/CleanOS.entitlements"
+if [[ "$IDENTITY" == Developer\ ID* ]]; then
+  echo "▸ Signing with $IDENTITY"
+  TIMESTAMP=(--timestamp)
 else
-  echo "⚠ Ad-hoc signed: Gatekeeper will block this DMG on other Macs and the privileged helper may be refused. Set CODESIGN_IDENTITY for a real release."
-  # An ad-hoc signature carries no team, so the hardened runtime's library validation refuses to load the
-  # embedded Sparkle framework and the app dies at launch. Keep the hardened runtime and waive only that check
-  # (signing again here also drops the get-task-allow entitlement Xcode injects into ad-hoc builds).
-  ADHOC_ENTITLEMENTS="$(mktemp -d)/CleanOS.entitlements"
-  cp App/CleanOS.entitlements "$ADHOC_ENTITLEMENTS"
-  /usr/libexec/PlistBuddy -c "Add :com.apple.security.cs.disable-library-validation bool true" "$ADHOC_ENTITLEMENTS"
-  codesign --force --options runtime --sign - --entitlements "$ADHOC_ENTITLEMENTS" "$APP"
-  rm -rf "$(dirname "$ADHOC_ENTITLEMENTS")"
-  codesign --verify --deep --strict "$APP"
+  if [[ "$IDENTITY" == "-" ]]; then
+    echo "⚠ Ad-hoc signed: every build gets a new identity, so macOS forgets granted permissions after updates. Use the"
+    echo "  project certificate (Scripts/signing-cert.sh) or a Developer ID for anything you publish."
+  else
+    echo "▸ Signing with the self-signed certificate \"$IDENTITY\" (not notarized: users click Open Anyway once)"
+  fi
+  TIMESTAMP=(--timestamp=none)
+  # Without an Apple team ID the hardened runtime's library validation refuses the embedded Sparkle framework and the
+  # app dies at launch. Keep the hardened runtime and waive only that check.
+  ENTITLEMENTS="$(mktemp -d)/CleanOS.entitlements"
+  cp App/CleanOS.entitlements "$ENTITLEMENTS"
+  /usr/libexec/PlistBuddy -c "Add :com.apple.security.cs.disable-library-validation bool true" "$ENTITLEMENTS"
 fi
+sign() { codesign --force --options runtime "${TIMESTAMP[@]}" --sign "$IDENTITY" "$@"; }
+SPARKLE="$APP/Contents/Frameworks/Sparkle.framework"
+if [[ -d "$SPARKLE" ]]; then
+  sign "$SPARKLE/Versions/B/XPCServices/Installer.xpc"
+  sign --preserve-metadata=entitlements "$SPARKLE/Versions/B/XPCServices/Downloader.xpc"
+  sign "$SPARKLE/Versions/B/Autoupdate"
+  sign "$SPARKLE/Versions/B/Updater.app"
+  sign "$SPARKLE"
+fi
+sign "$APP/Contents/MacOS/com.cleanos.helper"
+sign "$APP/Contents/Library/LoginItems/CleanOS Trash Watcher.app"
+sign --entitlements "$ENTITLEMENTS" "$APP"
+[[ "$ENTITLEMENTS" == App/* ]] || rm -rf "$(dirname "$ENTITLEMENTS")"
+codesign --verify --deep --strict "$APP"
+for BINARY in "$APP/Contents/MacOS/com.cleanos.helper" "$APP/Contents/Library/LoginItems/CleanOS Trash Watcher.app"; do
+  if codesign -d --entitlements - --xml "$BINARY" 2>/dev/null | grep -q get-task-allow; then
+    echo "✗ $BINARY still carries get-task-allow" >&2; exit 1
+  fi
+done
 
 # dyld loads the embedded frameworks under the final signature before main() runs, so this catches a build
 # that cannot start (wrong signature, missing framework) before it is packaged.

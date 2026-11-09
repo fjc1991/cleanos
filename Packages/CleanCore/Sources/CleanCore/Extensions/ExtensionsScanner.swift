@@ -10,7 +10,7 @@ public struct ExtensionGroupInfo: Identifiable, Sendable, Hashable {
     }
 }
 
-/// Browser extensions, plug-ins and system extensions, grouped like App Cleaner's Extensions tab.
+/// Browser extensions and the system plug-in kinds CleanOS manages (system extensions and kexts are not covered).
 public actor ExtensionsScanner {
     public static let groups: [ExtensionGroupInfo] = [
         ExtensionGroupInfo(id: "installers", title: "Installation Files", description: "Disk images and packages on your startup disk.", systemImage: "shippingbox"),

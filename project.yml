@@ -30,6 +30,9 @@ settings:
     Debug:
       SWIFT_ACTIVE_COMPILATION_CONDITIONS: DEBUG
       ONLY_ACTIVE_ARCH: YES
+    Release:
+      # No get-task-allow in release binaries (the helper runs as root).
+      CODE_SIGN_INJECT_BASE_ENTITLEMENTS: NO
 packages:
   CleanCore:
     path: Packages/CleanCore
@@ -47,8 +50,6 @@ targets:
     sources:
       - path: App
         excludes: ["Info.plist", "CleanOS.entitlements", "Resources/AppIcon-preview.png"]
-      - path: Rules
-        type: folder
       - path: Helper/com.cleanos.helper.plist
         buildPhase:
           copyFiles:
@@ -64,21 +65,20 @@ targets:
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         LSMinimumSystemVersion: $(MACOSX_DEPLOYMENT_TARGET)
         LSApplicationCategoryType: public.app-category.utilities
-        NSHumanReadableCopyright: Copyright © 2026. All rights reserved.
+        NSHumanReadableCopyright: Copyright © 2026 Joe Costello. MIT License.
         NSHighResolutionCapable: true
         NSSupportsAutomaticTermination: false
         NSSupportsSuddenTermination: false
         CFBundleURLTypes:
           - CFBundleURLName: com.cleanos.app
             CFBundleURLSchemes: [cleanos]
-        NSAppleEventsUsageDescription: CleanOS asks Finder to list the Trash on other disks and to reveal files.
+        NSAppleEventsUsageDescription: CleanOS asks Finder to empty the Trash on other disks, and System Events to list and remove your login items.
         NSDesktopFolderUsageDescription: CleanOS looks for screenshots, installers and application aliases on your Desktop.
         NSDocumentsFolderUsageDescription: CleanOS looks for large files, duplicates and application service files in your Documents.
         NSDownloadsFolderUsageDescription: CleanOS looks for installers and large files in your Downloads.
         NSRemovableVolumesUsageDescription: CleanOS scans external disks for junk, purgeable space and application service files.
         NSNetworkVolumesUsageDescription: CleanOS can scan network volumes when you enable them in Settings.
         NSAppDataUsageDescription: CleanOS scans file sizes only. Grant Full Disk Access so this prompt does not repeat.
-        SMPrivilegedExecutables: {}
         # Sparkle (in-app updates). The feed is the appcast attached to the latest GitHub release.
         SUFeedURL: https://github.com/$(CLEANOS_GITHUB_REPO)/releases/latest/download/appcast.xml
         SUPublicEDKey: SPARKLE_PUBLIC_KEY_PLACEHOLDER
