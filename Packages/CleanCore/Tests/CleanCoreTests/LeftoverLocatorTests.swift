@@ -193,8 +193,8 @@ import Testing
         #expect(outcome.succeeded.count == plan.userItems.count)
         // Nothing was touched.
         #expect(FileManager.default.fileExists(atPath: fixture.home.appending(path: "Library/Caches/com.example.fakeapp").path))
-        let sessions = try await journal.allSessions()
-        #expect(sessions.first?.entries.count == plan.userItems.count)
+        // A simulation writes no History either.
+        #expect(try await journal.allSessions().isEmpty)
     }
 }
 

@@ -8,7 +8,8 @@ struct RemovalFlow: Identifiable {
     let title: String
     let apps: [InstalledApp]
     let items: [ScanItem]
-    let quit: @MainActor () async -> Bool
+    /// Quits the affected apps; returns the names of processes that are still running afterwards.
+    var quit: @MainActor () async -> [String] = { [] }
 
     var bundles: [ScanItem] { items.filter { $0.kind == .bundle } }
     var others: [ScanItem] { items.filter { $0.kind != .bundle } }
@@ -22,30 +23,47 @@ struct RemovalSheet: View {
     let flow: RemovalFlow
     var onFinished: (RemovalResult) -> Void
 
-    enum Phase { case review, running(done: Int, total: Int, current: ScanItem?), finished(RemovalResult) }
+    enum Phase { case review, blocked([String]), running(done: Int, total: Int, current: ScanItem?), finished(RemovalResult) }
     @State private var phase: Phase = .review
     @State private var permanently = AppSettings.removesPermanently
     @State private var recent: [ScanItem] = []
     @State private var freedSoFar: Int64 = 0
     @State private var excluded: Set<String> = []
+    @State private var lastProgress = Date.now
+    @State private var confirmPermanentFor: [ScanItem]?
 
     private var includedItems: [ScanItem] { flow.items.filter { !excluded.contains($0.id) } }
     private var includedSize: Int64 { includedItems.reduce(0) { $0 + $1.size } }
     private var isRunning: Bool { if case .running = phase { return true } else { return false } }
     private var runningApps: [InstalledApp] { flow.apps.filter { !ProcessMonitor.processes(inBundle: $0.url.standardizedFileURL.path).isEmpty } }
+    private var plan: RemovalPlan { RemovalPlan(selected: includedItems, permanently: permanently) }
+    /// Deleting for good: either the user's choice or items that are already in a Trash.
+    private var isDestructive: Bool { permanently || includedItems.contains { $0.payload["permanent"] == "1" } }
 
     var body: some View {
         VStack(spacing: 0) {
             switch phase {
             case .review: review
+            case .blocked(let survivors): blocked(survivors)
             case .running(let done, let total, let current):
                 CleanupProgressView(title: flow.title, done: done, total: total, current: current, recent: recent, freedSoFar: freedSoFar,
                                     groups: Array(NSOrderedSet(array: includedItems.map(\.group))) as? [String] ?? [])
+                    .overlay(alignment: .bottomTrailing) { stalledEscape }
             case .finished(let result): finished(result)
             }
         }
         .frame(width: 640, height: 560)
         .interactiveDismissDisabled(isRunning)
+        .alert("Delete permanently?", isPresented: Binding(get: { confirmPermanentFor != nil }, set: { if !$0 { confirmPermanentFor = nil } })) {
+            Button("Delete Permanently", role: .destructive) {
+                let items = confirmPermanentFor ?? []
+                confirmPermanentFor = nil
+                Task { await execute(RemovalPlan(selected: items, permanently: true)) }
+            }
+            Button("Cancel", role: .cancel) { confirmPermanentFor = nil }
+        } message: {
+            Text("\(countText(confirmPermanentFor?.count ?? 0, "item")) will be deleted and cannot be restored, not even from History.")
+        }
     }
 
     // MARK: Review
@@ -53,9 +71,7 @@ struct RemovalSheet: View {
     private var review: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text(summaryTitle).font(.title3.weight(.semibold))
-            Text(permanently ? "Items will be deleted permanently and cannot be restored."
-                             : "Items will be moved to the Trash and can be restored from History.")
-                .font(.callout).foregroundStyle(.secondary)
+            Text(summaryText).font(.callout).foregroundStyle(isDestructive ? Theme.warning : .secondary)
             List {
                 ForEach(Dictionary(grouping: flow.items, by: \.group).keys.sorted { LeftoverGroups.rank($0) < LeftoverGroups.rank($1) }, id: \.self) { group in
                     Section(group) {
@@ -64,13 +80,16 @@ struct RemovalSheet: View {
                                 TriStateCheckbox(state: excluded.contains(item.id) ? .none : .all) {
                                     if excluded.contains(item.id) { excluded.remove(item.id) } else { excluded.insert(item.id) }
                                 }
+                                .accessibilityLabel("Include \(item.title)")
                                 if item.kind == .registration { Image(systemName: CleanupSymbols.symbol(for: item.group)).foregroundStyle(Theme.accent) } else { FileIcon(url: item.url) }
                                 VStack(alignment: .leading) {
                                     Text(item.title).lineLimit(1)
                                     Text(item.subtitle ?? item.url?.path ?? "").font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
                                 }
                                 Spacer()
-                                if item.needsRoot { Image(systemName: "lock.fill").foregroundStyle(.secondary) }
+                                if item.needsRoot {
+                                    Image(systemName: "lock.fill").foregroundStyle(.secondary).help("Needs administrator rights").accessibilityLabel("Needs administrator rights")
+                                }
                                 TierBadge(tier: item.tier)
                                 Text(item.size.formattedBytes).font(.caption.monospacedDigit()).foregroundStyle(.secondary).frame(width: 80, alignment: .trailing)
                             }
@@ -83,32 +102,33 @@ struct RemovalSheet: View {
             .listStyle(.inset)
             if !runningApps.isEmpty {
                 let processCount = runningApps.reduce(0) { $0 + ProcessMonitor.processes(inBundle: $1.url.standardizedFileURL.path).count }
-                Label("\(runningApps.map(\.name).joined(separator: ", ")) \(runningApps.count == 1 ? "has" : "have") \(processCount) running process\(processCount == 1 ? "" : "es") (app, helpers, background agents); they will be quit, force-stopped if needed.", systemImage: "power")
+                Label("\(runningApps.map(\.name).joined(separator: ", ")) \(runningApps.count == 1 ? "has" : "have") \(countText(processCount, "running process", plural: "running processes")) (app, helpers, background agents); they will be quit first. Unsaved changes in them may be lost.", systemImage: "power")
                     .font(.callout).foregroundStyle(.secondary)
             }
-            if flow.items.contains(where: { $0.tier == .caution }) {
+            if includedItems.contains(where: { $0.tier == .caution }) {
                 Label("Some items are marked Caution: they may hold your own data or be shared with other apps.", systemImage: "exclamationmark.triangle.fill")
                     .font(.callout).foregroundStyle(Theme.warning)
             }
-            if flow.items.contains(where: \.needsRoot) {
-                HStack {
-                    Label(appModel.helper.isAvailable ? "Items with a lock are removed by the CleanOS helper with administrator privileges."
-                                                      : "Items with a lock need administrator privileges, or they will be skipped.",
-                          systemImage: "lock.fill")
-                        .font(.callout).foregroundStyle(.secondary)
-                    if !appModel.helper.isAvailable {
-                        Button("Enable Helper…") { appModel.helper.register() }.controlSize(.small)
-                    }
-                }
+            if includedItems.contains(where: \.needsRoot) {
+                Label(appModel.helper.isAvailable ? "Items with a lock are removed by the CleanOS helper."
+                                                  : "Items with a lock belong to the system or another user. macOS will ask for your administrator password once.",
+                      systemImage: "lock.fill")
+                    .font(.callout).foregroundStyle(.secondary)
             }
             HStack {
                 Toggle("Delete permanently", isOn: $permanently).toggleStyle(.checkbox)
                 Spacer()
                 Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
-                Button(flow.title.hasPrefix("Reset") ? "Reset" : (excluded.isEmpty ? "Remove" : "Remove \(includedItems.count)")) { Task { await run() } }
-                    .buttonStyle(PrimaryActionButtonStyle())
-                    .keyboardShortcut(.defaultAction)
-                    .disabled(includedItems.isEmpty)
+                if isDestructive {
+                    Button(role: .destructive) { Task { await start() } } label: { Text(excluded.isEmpty ? "Delete Permanently" : "Delete \(includedItems.count) Permanently") }
+                        .buttonStyle(.borderedProminent).tint(Theme.danger)
+                        .disabled(includedItems.isEmpty)
+                } else {
+                    Button(flow.title.hasPrefix("Reset") ? "Reset" : (excluded.isEmpty ? "Remove" : "Remove \(includedItems.count)")) { Task { await start() } }
+                        .buttonStyle(PrimaryActionButtonStyle())
+                        .keyboardShortcut(.defaultAction)
+                        .disabled(includedItems.isEmpty)
+                }
             }
         }
         .padding(20)
@@ -117,30 +137,76 @@ struct RemovalSheet: View {
     private var summaryTitle: String {
         let apps = includedItems.filter { $0.kind == .bundle }.count
         let items = includedItems.filter { $0.kind != .bundle }.count
+        if flow.title.hasPrefix("Reset") { return "\(flow.title) · \(countText(items, "item")) · \(includedSize.formattedBytes)" }
         switch (apps, items) {
-        case (0, _): return "\(items) Item\(items == 1 ? "" : "s") Cleanup · \(includedSize.formattedBytes)"
-        case (_, 0): return "\(apps) Application\(apps == 1 ? "" : "s") Uninstalling · \(includedSize.formattedBytes)"
-        default: return "\(apps) Application\(apps == 1 ? "" : "s") Uninstalling, \(items) Item\(items == 1 ? "" : "s") Cleanup · \(includedSize.formattedBytes)"
+        case (0, _): return "Remove \(countText(items, "item")) · \(includedSize.formattedBytes)"
+        case (_, 0): return "Uninstall \(countText(apps, "app")) · \(includedSize.formattedBytes)"
+        default: return "Uninstall \(countText(apps, "app")) and \(countText(items, "related item")) · \(includedSize.formattedBytes)"
         }
+    }
+
+    private var summaryText: String {
+        if permanently { return "Everything below will be deleted permanently and cannot be restored." }
+        let plan = plan
+        let irreversible = plan.irreversibleCount
+        let base = "Items are moved to the Trash and can be put back from History."
+        guard irreversible > 0 else { return base }
+        return base + " \(countText(irreversible, "item")) (Trash contents and system settings) cannot be restored."
     }
 
     // MARK: Running
 
-    private func run() async {
-        let plan = RemovalPlan(selected: includedItems, permanently: permanently)
+    private func start() async {
+        let plan = plan
         phase = .running(done: 0, total: plan.count, current: nil)
-        let quitOK = await flow.quit()
-        if !quitOK {
-            var result = RemovalResult()
-            for item in includedItems { result.failed.append((item, "The application is still running.")) }
-            phase = .finished(result)
+        lastProgress = .now
+        let survivors = await flow.quit()
+        if !survivors.isEmpty {
+            phase = .blocked(survivors)
             return
         }
-        let executor = RemovalExecutor(journal: appModel.journal,
-                                       rootRemover: appModel.helper.isAvailable ? appModel.helper.rootRemover() : nil,
-                                       registrationRemover: RegistrationRemover(runAsRoot: appModel.helper.isAvailable ? appModel.helper.rootRunner() : nil))
+        await execute(plan)
+    }
+
+    private func blocked(_ survivors: [String]) -> some View {
+        VStack(spacing: 14) {
+            Spacer()
+            Image(systemName: "exclamationmark.octagon.fill").font(.system(size: 48)).foregroundStyle(Theme.warning)
+            Text("Some processes are still running").font(.title3.weight(.semibold))
+            Text("\(survivors.joined(separator: ", ")) could not be stopped; they probably belong to the system or another user. Removing the app while they run can leave parts of it behind until you restart.")
+                .multilineTextAlignment(.center).foregroundStyle(.secondary).frame(maxWidth: 480)
+            Spacer()
+            HStack {
+                Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
+                Button("Remove Anyway") { Task { await execute(plan) } }.buttonStyle(PrimaryActionButtonStyle())
+            }
+        }
+        .padding(20)
+    }
+
+    /// Appears when nothing has progressed for a while, so no failure can trap the user in the sheet.
+    @ViewBuilder private var stalledEscape: some View {
+        TimelineView(.periodic(from: .now, by: 5)) { context in
+            if context.date.timeIntervalSince(lastProgress) > 20 {
+                Button("Close") { dismiss() }
+                    .help("The removal continues in the background; History shows what was removed.")
+                    .padding(16)
+            }
+        }
+    }
+
+    private func execute(_ plan: RemovalPlan) async {
+        guard !plan.isEmpty else { return }
+        recent = []
+        freedSoFar = 0
+        phase = .running(done: 0, total: plan.count, current: nil)
+        lastProgress = .now
+        await appModel.helper.refreshAndVerify()
+        let executor = RemovalExecutor(journal: appModel.journal, rootRemover: appModel.rootRemover(),
+                                       registrationRemover: RegistrationRemover(runAsRoot: appModel.rootRunner()))
         let result = await executor.execute(plan, title: flow.title, appVersion: AppModel.appVersion) { done, total, current in
             Task { @MainActor in
+                lastProgress = .now
                 if case .running(let previousDone, _, let previous) = phase, let previous, done > previousDone {
                     withAnimation(.spring(duration: 0.4)) {
                         recent.insert(previous, at: 0)
@@ -150,6 +216,9 @@ struct RemovalSheet: View {
                 }
                 withAnimation(.easeInOut(duration: 0.35)) { phase = .running(done: done, total: total, current: current) }
             }
+        }
+        for failure in result.failed {
+            Diagnostics.log("removal failed [\(failure.problem.rawValue)] \(failure.item.url?.path ?? failure.item.id): \(failure.error)")
         }
         try? await Task.sleep(for: .milliseconds(600))   // let the ring reach 100 % before the results appear
         withAnimation(.spring(duration: 0.5)) { phase = .finished(result) }
@@ -164,48 +233,133 @@ struct RemovalSheet: View {
         guard granted else { return }
         let content = UNMutableNotificationContent()
         content.title = "\(flow.title) finished"
-        content.body = "\(result.succeeded.count) item\(result.succeeded.count == 1 ? "" : "s") removed, \(result.freedBytes.formattedBytes) freed" + (result.failed.isEmpty ? "." : "; \(result.failed.count) skipped.")
+        content.body = "\(countText(result.succeeded.count, "item")) removed" + (result.failed.isEmpty ? "." : "; \(result.failed.count) need your attention.")
         try? await center.add(UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil))
     }
 
     // MARK: Finished
 
+    private func headline(_ result: RemovalResult) -> String {
+        if result.isDryRun { return "Simulation finished: nothing was removed" }
+        if result.failed.isEmpty { return "Removed \(countText(result.succeeded.count, "item"))" }
+        if result.succeeded.isEmpty { return "Nothing was removed" }
+        return "Removed \(result.succeeded.count) of \(result.succeeded.count + result.failed.count); \(result.failed.count) need\(result.failed.count == 1 ? "s" : "") your attention"
+    }
+
+    private func spaceLine(_ result: RemovalResult) -> String {
+        var parts: [String] = []
+        if result.trashedBytes > 0 { parts.append("\(result.trashedBytes.formattedBytes) moved to the Trash") }
+        if result.freedBytes > 0 { parts.append("\(result.freedBytes.formattedBytes) freed") }
+        return parts.isEmpty ? "" : parts.joined(separator: ", ")
+    }
+
     private func finished(_ result: RemovalResult) -> some View {
-        VStack(spacing: 14) {
-            Spacer()
-            Image(systemName: result.failed.isEmpty ? "checkmark.seal.fill" : "exclamationmark.triangle.fill")
-                .font(.system(size: 56))
-                .foregroundStyle(LinearGradient(colors: [Theme.success, Theme.accent], startPoint: .topLeading, endPoint: .bottomTrailing))
+        VStack(spacing: 12) {
+            let ok = result.failed.isEmpty
+            Image(systemName: ok ? "checkmark.seal.fill" : "exclamationmark.triangle.fill")
+                .font(.system(size: 52))
+                .foregroundStyle(ok ? AnyShapeStyle(LinearGradient(colors: [Theme.success, Theme.accent], startPoint: .topLeading, endPoint: .bottomTrailing))
+                                    : AnyShapeStyle(Theme.warning))
                 .symbolEffect(.bounce, value: result.succeeded.count)
-                .transition(.scale.combined(with: .opacity))
-            Text(result.isDryRun ? "Dry run complete" : "You just successfully removed \(result.succeeded.count) item\(result.succeeded.count == 1 ? "" : "s")")
-                .font(.title3.weight(.semibold))
-            Text("\(result.freedBytes.formattedBytes) of space freed").font(.title3.monospacedDigit()).foregroundStyle(.secondary).contentTransition(.numericText())
-            if result.isDryRun {
-                Text("CLEANOS_DRY_RUN is set, so nothing was touched.").font(.caption).foregroundStyle(.secondary)
+                .padding(.top, 8)
+            Text(headline(result)).font(.title3.weight(.semibold)).multilineTextAlignment(.center)
+            if !spaceLine(result).isEmpty {
+                Text(spaceLine(result)).font(.callout.monospacedDigit()).foregroundStyle(.secondary)
             }
-            if !result.failed.isEmpty {
-                List(result.failed, id: \.item.id) { failure in
-                    VStack(alignment: .leading) {
-                        Text(failure.item.title)
-                        Text(failure.error).font(.caption).foregroundStyle(Theme.danger)
-                    }
-                }
-                .frame(maxHeight: 180)
+            if result.journalFailed {
+                Label("History could not record these removals; use the Trash to put things back.", systemImage: "exclamationmark.circle")
+                    .font(.caption).foregroundStyle(Theme.warning)
             }
-            Spacer()
+            if !result.failed.isEmpty { failureList(result) }
+            Spacer(minLength: 0)
             HStack {
-                if !result.isDryRun, result.succeeded.contains(where: { $0.kind != .registration }) {
-                    Button("Show in Trash") { NSWorkspace.shared.open(FileManager.default.homeDirectoryForCurrentUser.appending(path: ".Trash")) }
+                if !result.isDryRun, !result.trashedPaths.isEmpty {
+                    Button("Show in Trash") { NSWorkspace.shared.activateFileViewerSelecting(result.trashedPaths.prefix(20).map { URL(filePath: $0) }) }
+                }
+                if !result.isDryRun, result.sessionID != nil {
                     Button("History…") { dismiss(); appModel.showHistory = true }
                 }
+                Spacer()
                 Button("Done") { dismiss() }.buttonStyle(PrimaryActionButtonStyle()).keyboardShortcut(.defaultAction)
             }
         }
         .padding(20)
     }
+
+    private func failureList(_ result: RemovalResult) -> some View {
+        let groups = Dictionary(grouping: result.failed, by: \.problem)
+        let order: [RemovalProblem] = [.needsAdministrator, .cancelled, .privacyProtected, .stillRunning, .noTrash, .readOnlyVolume, .locked, .protectedLocation, .notFound, .other]
+        return List {
+            ForEach(order.filter { groups[$0] != nil }, id: \.self) { problem in
+                let failures = groups[problem] ?? []
+                Section {
+                    ForEach(failures) { failure in
+                        HStack(alignment: .top) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(failure.item.title).lineLimit(1)
+                                Text(failure.error).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                            }
+                            Spacer()
+                            if let url = failure.item.url, FileManager.default.fileExists(atPath: url.path) {
+                                Button { NSWorkspace.shared.activateFileViewerSelecting([url]) } label: { Image(systemName: "magnifyingglass") }
+                                    .buttonStyle(.borderless).help("Reveal in Finder").accessibilityLabel("Reveal \(failure.item.title) in Finder")
+                            }
+                        }
+                    }
+                } header: {
+                    HStack {
+                        Text(Self.title(for: problem)).font(.headline)
+                        Spacer()
+                        actions(for: problem, items: failures.map(\.item))
+                    }
+                }
+            }
+        }
+        .listStyle(.inset)
+        .frame(maxHeight: 250)
+    }
+
+    @ViewBuilder private func actions(for problem: RemovalProblem, items: [ScanItem]) -> some View {
+        switch problem {
+        case .needsAdministrator, .cancelled:
+            Button("Try Again with Password") { Task { await execute(RemovalPlan(selected: items, permanently: permanently)) } }.controlSize(.small)
+        case .privacyProtected:
+            if items.contains(where: { $0.url?.pathExtension == "app" }) {
+                Button("Open App Management") { NSWorkspace.shared.open(Self.appManagementURL) }.controlSize(.small)
+            }
+            Button("Open Full Disk Access") { NSWorkspace.shared.open(FullDiskAccess.settingsURL) }.controlSize(.small)
+            Button("Try Again") { Task { await execute(RemovalPlan(selected: items, permanently: permanently)) } }.controlSize(.small)
+        case .stillRunning, .other:
+            Button("Try Again") { Task { await execute(RemovalPlan(selected: items, permanently: permanently)) } }.controlSize(.small)
+        case .noTrash:
+            Button("Delete Permanently…") { confirmPermanentFor = items }.controlSize(.small)
+        case .readOnlyVolume, .locked, .protectedLocation, .notFound:
+            EmptyView()
+        }
+    }
+
+    static let appManagementURL = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AppBundles")!
+
+    static func title(for problem: RemovalProblem) -> String {
+        switch problem {
+        case .needsAdministrator: "Needs administrator rights"
+        case .cancelled: "Password prompt cancelled"
+        case .privacyProtected: "Blocked by macOS privacy protection"
+        case .stillRunning: "Still in use"
+        case .noTrash: "This disk has no Trash"
+        case .readOnlyVolume: "On a read-only disk"
+        case .locked: "Locked or protected by macOS"
+        case .protectedLocation: "Protected by CleanOS"
+        case .notFound: "No longer there"
+        case .other: "Could not be removed"
+        }
+    }
 }
 
+/// "1 item", "3 items".
+func countText(_ count: Int, _ singular: String, plural: String? = nil) -> String {
+    "\(count) \(count == 1 ? singular : (plural ?? singular + "s"))"
+}
 
 /// Animated "cleaning in progress" view: gradient ring with a sweeping highlight, the item being removed,
 /// pulsing icons for the kinds of things in the batch and a feed of what was just removed.

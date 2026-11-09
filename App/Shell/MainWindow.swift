@@ -27,6 +27,7 @@ struct MainWindow: View {
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             model.refreshPermissions()
             model.refreshVolumes()
+            Task { await model.helper.refreshAndVerify() }
         }
     }
 }
@@ -48,7 +49,6 @@ struct SectionContainer: View {
             case .biggestFiles: BiggestFilesView()
             case .duplicates: DuplicatesView()
             case .updates: UpdatesView()
-            default: PlaceholderSectionView(section: section)
             }
         }
         .id(section)

@@ -51,7 +51,7 @@ struct ApplicationsView: View {
                         .padding(.trailing, 8)
                 }
                 Button("Remove") {
-                    removalFlow = RemovalFlow(title: "Remove remains", apps: [], items: items, quit: { true })
+                    removalFlow = RemovalFlow(title: "Remove remains", apps: [], items: items)
                 }
                 .buttonStyle(PrimaryActionButtonStyle())
                 .disabled(items.isEmpty)
@@ -116,14 +116,12 @@ struct ApplicationsView: View {
 
     private func startRemoval(title: String, resetting app: InstalledApp? = nil) {
         if let app {
-            removalFlow = RemovalFlow(title: "Reset \(app.name)", apps: [app], items: model.scans[app.id]?.allItems.filter { $0.kind != .bundle && $0.tier.isSelectableByDefault && !$0.needsRoot } ?? [],
-                                      quit: { await model.quit(app) })
+            removalFlow = RemovalFlow(title: "Reset \(app.name)", apps: [app], items: model.scans[app.id]?.allItems.filter { $0.kind != .bundle && $0.tier.isSelectableByDefault } ?? [],
+                                      quit: { await model.quit([app]) })
         } else {
             let perApp = model.selectedPerApp
-            removalFlow = RemovalFlow(title: title, apps: perApp.map(\.app), items: perApp.flatMap(\.items), quit: {
-                for app in perApp.map(\.app) where model.isRunning(app) { _ = await model.quit(app) }
-                return true
-            })
+            let apps = perApp.map(\.app)
+            removalFlow = RemovalFlow(title: title, apps: apps, items: perApp.flatMap(\.items), quit: { await model.quit(apps) })
         }
     }
 

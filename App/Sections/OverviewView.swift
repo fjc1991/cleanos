@@ -30,7 +30,7 @@ struct OverviewView: View {
                     Text("\(items.count) items · \(model.cleanUp.selectedSize.formattedBytes)").font(.callout.monospacedDigit()).foregroundStyle(.secondary).padding(.trailing, 8)
                 }
                 Button(AppSection.overview.actionTitle) {
-                    removalFlow = RemovalFlow(title: "Clean Up", apps: [], items: items, quit: { true })
+                    removalFlow = RemovalFlow(title: "Clean Up", apps: [], items: items)
                 }
                 .buttonStyle(PrimaryActionButtonStyle())
                 .disabled(items.isEmpty)

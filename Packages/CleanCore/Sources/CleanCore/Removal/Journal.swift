@@ -15,6 +15,10 @@ public struct JournalEntry: Codable, Sendable, Identifiable, Hashable {
     public var volumeID: String?
     public var size: Int64
     public var detail: String?
+    /// Inode of the trashed copy, so a different item later trashed under the same name is never "restored".
+    public var trashedInode: UInt64?
+    /// Set once the entry was put back; it is then no longer restorable.
+    public var restoredAt: Date?
 
     public init(id: UUID = UUID(), date: Date = .now, action: JournalAction, originalPath: String,
                 trashedPath: String? = nil, volumeID: String? = nil, size: Int64 = 0, detail: String? = nil) {
@@ -26,12 +30,18 @@ public struct JournalEntry: Codable, Sendable, Identifiable, Hashable {
         self.volumeID = volumeID
         self.size = size
         self.detail = detail
+        if let trashedPath { trashedInode = Self.inode(of: trashedPath) }
     }
 
-    /// Entries that moved something to the Trash can be restored while the trashed copy still exists.
+    static func inode(of path: String) -> UInt64? {
+        var info = stat()
+        return lstat(path, &info) == 0 ? UInt64(info.st_ino) : nil
+    }
+
+    /// Entries that moved something to the Trash can be restored once, while that same trashed copy still exists.
     public var isRestorable: Bool {
-        guard action == .movedToTrash, let trashedPath else { return false }
-        return FileManager.default.fileExists(atPath: trashedPath)
+        guard action == .movedToTrash, restoredAt == nil, let trashedPath, let current = Self.inode(of: trashedPath) else { return false }
+        return trashedInode == nil || trashedInode == current
     }
 }
 
@@ -92,9 +102,10 @@ public actor RemovalJournal {
         try write(session)
     }
 
-    /// All sessions, newest first.
+    /// All sessions, newest first. Also picks up sessions another process (the Trash Watcher) wrote meanwhile.
     public func allSessions() throws -> [JournalSession] {
         try loadIfNeeded()
+        loadNewFiles()
         return sessions.values.sorted { $0.startedAt > $1.startedAt }
     }
 
@@ -117,6 +128,7 @@ public actor RemovalJournal {
                 if fm.fileExists(atPath: entry.originalPath) { throw JournalError.destinationExists(entry.originalPath) }
                 try fm.moveItem(at: URL(filePath: trashedPath), to: destination)
                 report.restored.append(entry)
+                if let index = session.entries.firstIndex(where: { $0.id == entry.id }) { session.entries[index].restoredAt = .now }
                 session.entries.append(JournalEntry(action: .restored, originalPath: entry.originalPath, size: entry.size,
                                                     detail: "Restored from \(trashedPath)"))
             } catch {
@@ -143,6 +155,7 @@ public actor RemovalJournal {
             if FileManager.default.fileExists(atPath: entry.originalPath) { throw JournalError.destinationExists(entry.originalPath) }
             try FileManager.default.moveItem(at: URL(filePath: trashedPath), to: destination)
             report.restored.append(entry)
+            if let index = session.entries.firstIndex(where: { $0.id == entry.id }) { session.entries[index].restoredAt = .now }
             session.entries.append(JournalEntry(action: .restored, originalPath: entry.originalPath, size: entry.size, detail: "Restored from \(trashedPath)"))
             sessions[sessionID] = session
             try write(session)
@@ -197,10 +210,13 @@ public actor RemovalJournal {
     private func loadIfNeeded() throws {
         guard !loaded else { return }
         loaded = true
-        let fm = FileManager.default
-        guard fm.fileExists(atPath: directory.path) else { return }
-        let files = (try? fm.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)) ?? []
+        loadNewFiles()
+    }
+
+    private func loadNewFiles() {
+        let files = (try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)) ?? []
         for file in files where file.pathExtension == "json" {
+            guard let id = UUID(uuidString: file.deletingPathExtension().lastPathComponent), sessions[id] == nil else { continue }
             if let data = try? Data(contentsOf: file), let session = try? Self.decoder.decode(JournalSession.self, from: data) {
                 sessions[session.id] = session
             }

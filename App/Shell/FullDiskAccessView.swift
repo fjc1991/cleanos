@@ -12,14 +12,17 @@ struct FullDiskAccessView: View {
                 .font(.system(size: 44))
                 .foregroundStyle(LinearGradient(colors: [Theme.accent, Theme.accentSecondary], startPoint: .top, endPoint: .bottom))
             Text("Grant Full Disk Access").font(.title2.weight(.semibold))
-            Text("CleanOS scans caches, logs, service files and the Trash of every disk. macOS hides most of those folders from apps until you allow Full Disk Access. The app only reads sizes until you confirm a removal.")
+            Text(model.launchedAfterUpdate
+                 ? "CleanOS was updated, and macOS no longer applies the Full Disk Access you gave the previous version. Allow it once more."
+                 : "CleanOS scans caches, logs, service files and the Trash of every disk, and removes other apps. macOS hides most of those folders from apps, and protects other apps, until you allow Full Disk Access. The app only reads sizes until you confirm a removal.")
                 .multilineTextAlignment(.center)
                 .foregroundStyle(.secondary)
                 .frame(maxWidth: 420)
             VStack(alignment: .leading, spacing: 8) {
                 Label("Open System Settings → Privacy & Security → Full Disk Access", systemImage: "1.circle")
                 Label("Turn on CleanOS in the list (drag the app in if it is missing)", systemImage: "2.circle")
-                Label("Come back here; the status updates automatically", systemImage: "3.circle")
+                Label("Already on? Select CleanOS, click −, then add it again (needed after updates)", systemImage: "3.circle")
+                Label("Come back here; the status updates automatically", systemImage: "4.circle")
             }
             .font(.callout)
             .frame(maxWidth: 420, alignment: .leading)

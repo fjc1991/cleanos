@@ -3,7 +3,9 @@ import ServiceManagement
 import CleanCore
 import HelperProtocol
 
-/// Registers the privileged helper with `SMAppService` and talks to it over XPC.
+/// The optional privileged helper (an `SMAppService` daemon). When it is installed and answers, administrator work
+/// runs without a password prompt; otherwise `AdminAuthorizedRunner` asks for the password. The helper only accepts
+/// a CleanOS signed with its own certificate, so ad-hoc builds never offer it.
 @MainActor
 @Observable
 final class HelperClient {
@@ -12,11 +14,23 @@ final class HelperClient {
     var status: Status = .unknown
     var version: String?
     var lastError: String?
+    /// The helper answered the version handshake with the protocol this app speaks.
+    private(set) var isVerified = false
+
+    /// Whether this build can use an installed helper at all: it must be signed with a certificate the helper can pin.
+    let isSupported: Bool = {
+        #if DEBUG
+        return true
+        #else
+        return CodeIdentity.leafCertificateHash() != nil
+        #endif
+    }()
 
     private let service = SMAppService.daemon(plistName: "com.cleanos.helper.plist")
-    private var connection: NSXPCConnection?
 
     init() { refresh() }
+
+    var isAvailable: Bool { isSupported && status == .enabled && isVerified }
 
     func refresh() {
         switch service.status {
@@ -26,6 +40,14 @@ final class HelperClient {
         case .notFound: status = .notFound
         @unknown default: status = .unknown
         }
+        if status != .enabled { isVerified = false }
+    }
+
+    /// Refreshes the registration and, when enabled, checks that the helper really answers.
+    func refreshAndVerify() async {
+        refresh()
+        guard isSupported, status == .enabled else { return }
+        await checkVersion()
     }
 
     func register() {
@@ -46,67 +68,106 @@ final class HelperClient {
         } catch {
             lastError = error.localizedDescription
         }
-        connection?.invalidate()
-        connection = nil
         refresh()
     }
 
-    var isAvailable: Bool { status == .enabled }
-
-    private func proxy() -> CleanOSHelperProtocol? {
-        guard isAvailable else { return nil }
-        if connection == nil {
-            let c = NSXPCConnection(machServiceName: HelperConstants.machServiceName, options: .privileged)
-            c.remoteObjectInterface = NSXPCInterface(with: CleanOSHelperProtocol.self)
-            c.invalidationHandler = { [weak self] in Task { @MainActor in self?.connection = nil } }
-            c.resume()
-            connection = c
-        }
-        return connection?.remoteObjectProxyWithErrorHandler { [weak self] error in
-            Task { @MainActor in self?.lastError = error.localizedDescription }
-        } as? CleanOSHelperProtocol
+    /// After an update the old daemon can keep running old code; re-registering replaces it.
+    func reinstall() async {
+        await unregister()
+        register()
+        await refreshAndVerify()
     }
 
     func checkVersion() async {
-        guard let proxy = proxy() else { return }
-        version = await withCheckedContinuation { continuation in
-            proxy.version { version, _ in continuation.resume(returning: version) }
+        let answer: (String, Int)? = await call(timeout: .seconds(5), failure: { _ in nil }) { proxy, reply in
+            proxy.version { version, protocolVersion in reply((version, protocolVersion)) }
+        }
+        version = answer?.0
+        isVerified = answer?.1 == HelperConstants.protocolVersion
+        if let answer, answer.1 != HelperConstants.protocolVersion {
+            lastError = "The installed helper (\(answer.0)) is from another version of CleanOS. Reinstall it."
+        } else if answer == nil {
+            lastError = "The helper is enabled but does not answer."
+        } else {
+            lastError = nil
         }
     }
 
-    func remove(paths: [String], permanently: Bool) async -> [String: String] {
-        guard let proxy = proxy() else { return Dictionary(uniqueKeysWithValues: paths.map { ($0, "The helper is not enabled.") }) }
-        return await withCheckedContinuation { continuation in
-            proxy.remove(paths: paths, permanently: permanently) { continuation.resume(returning: $0) }
+    // MARK: Requests
+
+    private func perform(_ request: HelperRequest, timeout: Duration) async -> HelperResponse {
+        guard isAvailable, let data = try? JSONEncoder().encode(request) else { return .failed("The helper is not available.") }
+        return await call(timeout: timeout, failure: { .failed($0) }) { proxy, reply in
+            proxy.perform(data) { answer in
+                reply((try? JSONDecoder().decode(HelperResponse.self, from: answer)) ?? .failed("The helper sent an unreadable answer."))
+            }
+        }
+    }
+
+    func remove(_ requests: [RootRemovalRequest]) async -> [RootRemovalResult] {
+        switch await perform(.remove(items: requests, uid: getuid(), gid: getgid()), timeout: .seconds(600)) {
+        case .removed(let results): return results
+        case .failed(let message): return requests.map { RootRemovalResult(path: $0.path, error: message) }
+        case .ran: return requests.map { RootRemovalResult(path: $0.path, error: "Unexpected answer from the helper.") }
         }
     }
 
     func run(tool: String, arguments: [String]) async -> (Int32, String, String) {
-        guard let proxy = proxy() else { return (-1, "", "The helper is not enabled.") }
-        return await withCheckedContinuation { continuation in
-            proxy.run(tool: tool, arguments: arguments) { continuation.resume(returning: ($0, $1, $2)) }
+        switch await perform(.run(tool: tool, arguments: arguments), timeout: .seconds(120)) {
+        case .ran(let result): return (result.status, result.stdout, result.stderr)
+        case .failed(let message): return (-1, "", message)
+        case .removed: return (-1, "", "Unexpected answer from the helper.")
         }
     }
 
-    func readFile(atPath path: String) async -> Data? {
-        guard let proxy = proxy() else { return nil }
+    /// One XPC call on a fresh connection. Exactly one answer is delivered: the reply, the connection's error (a
+    /// refused or dropped connection), or the timeout, whichever comes first, so a caller can never hang.
+    private func call<T: Sendable>(timeout: Duration, failure: @escaping @Sendable (String) -> T,
+                                   _ body: (CleanOSHelperProtocol, @escaping @Sendable (T) -> Void) -> Void) async -> T {
+        let connection = NSXPCConnection(machServiceName: HelperConstants.machServiceName, options: .privileged)
+        connection.remoteObjectInterface = NSXPCInterface(with: CleanOSHelperProtocol.self)
+        #if !DEBUG
+        connection.setCodeSigningRequirement(CodeIdentity.requirement(identifier: HelperConstants.helperBundleIdentifier,
+                                                                      pinnedTo: CodeIdentity.leafCertificateHash()))
+        #endif
+        defer { connection.invalidate() }
         return await withCheckedContinuation { continuation in
-            proxy.readFile(atPath: path) { data, _ in continuation.resume(returning: data) }
+            let once = ResumeOnce(continuation)
+            connection.interruptionHandler = { once.resume(failure("The helper stopped while working.")) }
+            connection.invalidationHandler = { once.resume(failure("The helper refused the connection.")) }
+            connection.resume()
+            let proxy = connection.remoteObjectProxyWithErrorHandler { error in once.resume(failure(error.localizedDescription)) }
+            guard let helper = proxy as? CleanOSHelperProtocol else {
+                once.resume(failure("The helper interface is unavailable."))
+                return
+            }
+            body(helper) { once.resume($0) }
+            Task {
+                try? await Task.sleep(for: timeout)
+                once.resume(failure("The helper did not answer in time."))
+            }
         }
     }
+}
 
-    /// `RootRemover` for `RemovalExecutor`.
-    nonisolated func rootRemover() -> any RootRemover { HelperRootRemover(client: self) }
+/// Resumes a continuation at most once, from whichever path answers first.
+private final class ResumeOnce<T: Sendable>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<T, Never>?
+    init(_ continuation: CheckedContinuation<T, Never>) { self.continuation = continuation }
 
-    /// Closure the registration remover and startup controller use to run whitelisted tools as root.
-    nonisolated func rootRunner() -> @Sendable (String, [String]) async -> (Int32, String, String) {
-        { tool, arguments in await self.run(tool: tool, arguments: arguments) }
+    func resume(_ value: T) {
+        lock.lock()
+        let pending = continuation
+        continuation = nil
+        lock.unlock()
+        pending?.resume(returning: value)
     }
 }
 
 struct HelperRootRemover: RootRemover {
     let client: HelperClient
-    func remove(paths: [String], permanently: Bool) async -> [String: String] {
-        await client.remove(paths: paths, permanently: permanently)
+    func remove(_ requests: [RootRemovalRequest]) async -> [RootRemovalResult] {
+        await client.remove(requests)
     }
 }

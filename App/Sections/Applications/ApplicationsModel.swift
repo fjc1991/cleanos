@@ -28,8 +28,8 @@ final class ApplicationsModel {
     var scanning: Set<String> = []
     private var scanTasks: [String: Task<Void, Never>] = [:]
     var appSizes: [String: Int64] = [:]
-    var expertMode = UserDefaults.standard.bool(forKey: "expertMode") { didSet { UserDefaults.standard.set(expertMode, forKey: "expertMode") } }
-    var showLowConfidenceRemains = UserDefaults.standard.bool(forKey: "showLowConfidenceRemains") { didSet { UserDefaults.standard.set(showLowConfidenceRemains, forKey: "showLowConfidenceRemains") } }
+    var expertMode = UserDefaults.standard.bool(forKey: SettingsKey.expertMode) { didSet { UserDefaults.standard.set(expertMode, forKey: SettingsKey.expertMode) } }
+    var showLowConfidenceRemains = UserDefaults.standard.bool(forKey: SettingsKey.showLowConfidenceRemains) { didSet { UserDefaults.standard.set(showLowConfidenceRemains, forKey: SettingsKey.showLowConfidenceRemains) } }
     var expandedGroups: Set<String> = []
     let selection = SelectionStore()
 
@@ -90,7 +90,8 @@ final class ApplicationsModel {
             self.scans[app.id] = result
             self.scanning.remove(app.id)
             self.scanTasks[app.id] = nil
-            self.selection.selectDefaults(in: result.groups, allowRoot: false)
+            // Administrator rights are requested when needed, so locked items (and the app itself) are selected too.
+            self.selection.selectDefaults(in: result.groups, allowRoot: true)
             if self.expandedGroups.isEmpty { self.expandedGroups = Set(result.groups.prefix(4).map(\.id)) }
         }
         scanTasks[app.id] = task
@@ -132,7 +133,7 @@ final class ApplicationsModel {
     func setRemainsChecked(_ group: ScanItem, _ checked: Bool) {
         if checked {
             checkedRemainsIDs.insert(group.id)
-            selection.selectDefaults(in: [group], allowRoot: false)
+            selection.selectDefaults(in: [group], allowRoot: true)
         } else {
             checkedRemainsIDs.remove(group.id)
             selection.deselect(in: [group])
@@ -242,17 +243,24 @@ final class ApplicationsModel {
         !NSRunningApplication.runningApplications(withBundleIdentifier: app.bundleID).isEmpty
     }
 
-    /// Quits the app politely, force-quits it if it does not react, then kills every helper, agent and XPC service
-    /// that still runs from inside the bundle. Returns false only when a process of another user survives.
-    func quit(_ app: InstalledApp) async -> Bool {
-        let running = NSRunningApplication.runningApplications(withBundleIdentifier: app.bundleID)
+    /// Quits the apps politely, force-quits what does not react, then stops every helper, agent and XPC service of
+    /// the user that still runs from inside the bundles. Returns the names of processes that are still running
+    /// (those of the system or another user).
+    func quit(_ apps: [InstalledApp]) async -> [String] {
+        let running = apps.flatMap { NSRunningApplication.runningApplications(withBundleIdentifier: $0.bundleID) }
         for process in running { process.terminate() }
         for _ in 0..<12 where !running.allSatisfy(\.isTerminated) {
             try? await Task.sleep(for: .milliseconds(250))
         }
         for process in running where !process.isTerminated { process.forceTerminate() }
-        let survivors = await ProcessMonitor.forceStop(bundlePath: app.url.standardizedFileURL.path)
-        return survivors.isEmpty
+        var survivors: [String] = []
+        for app in apps {
+            let path = app.url.standardizedFileURL.path
+            guard !ProcessMonitor.processes(inBundle: path).isEmpty else { continue }
+            let left = await ProcessMonitor.forceStop(bundlePath: path)
+            survivors += ProcessMonitor.processes(inBundle: path).filter { left.contains($0.pid) }.map(\.name)
+        }
+        return Array(Set(survivors)).sorted()
     }
 
     /// Processes currently running from inside the bundle, for the review sheet.
@@ -268,6 +276,8 @@ final class ApplicationsModel {
             appSizes[app.id] = nil
         }
         apps.removeAll { removedAppPaths.contains($0.url.path) }
+        let cache = sizeCache
+        Task { await cache.invalidateAll() }
         for id in checkedAppIDs { scans[id] = nil }
         selection.clear()
         checkedRemainsIDs.removeAll()

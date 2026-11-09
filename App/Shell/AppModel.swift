@@ -1,5 +1,6 @@
 import SwiftUI
 import CleanCore
+import HelperProtocol
 
 /// Application-wide state shared through the environment.
 @MainActor
@@ -8,7 +9,12 @@ final class AppModel {
     var selectedSection: AppSection = .overview
     var volumes: [VolumeInfo] = []
     var fullDiskAccess: FullDiskAccess.Status = .unknown
-    var isFullDiskAccessSheetDismissed = false
+    /// "Not Now" on the Full Disk Access sheet, remembered across launches; the sidebar keeps a Grant button.
+    var isFullDiskAccessSheetDismissed = UserDefaults.standard.bool(forKey: SettingsKey.fullDiskAccessPromptDismissed) {
+        didSet { UserDefaults.standard.set(isFullDiskAccessSheetDismissed, forKey: SettingsKey.fullDiskAccessPromptDismissed) }
+    }
+    /// The previous launch was a different version: an earlier Full Disk Access grant may no longer apply.
+    let launchedAfterUpdate: Bool
     /// Set by a `cleanos://remains?bundleID=` deep link; the Applications section consumes it.
     var pendingRemainsBundleID: String?
 
@@ -69,8 +75,13 @@ final class AppModel {
     }
 
     init() {
+        let previous = UserDefaults.standard.string(forKey: SettingsKey.lastLaunchedVersion)
+        launchedAfterUpdate = previous != nil && previous != Self.appVersion
+        UserDefaults.standard.set(Self.appVersion, forKey: SettingsKey.lastLaunchedVersion)
         refreshVolumes()
         refreshPermissions()
+        // A grant that stopped applying after an update deserves the sheet again, even after "Not Now".
+        if launchedAfterUpdate && fullDiskAccess == .denied { isFullDiskAccessSheetDismissed = false }
         Diagnostics.log("launch \(Self.appVersion); full disk access = \(fullDiskAccess); arguments = \(CommandLine.arguments.dropFirst().joined(separator: " "))")
         support.recordLaunch()
         handleLaunchArguments()
@@ -108,7 +119,24 @@ final class AppModel {
     }
 
     var needsFullDiskAccessPrompt: Bool {
-        fullDiskAccess != .granted && !isFullDiskAccessSheetDismissed
+        fullDiskAccess == .denied && !isFullDiskAccessSheetDismissed
+    }
+
+    // MARK: Administrator rights
+
+    /// Removes items with administrator rights: the installed helper when it answers, otherwise the macOS password prompt.
+    func rootRemover() -> any RootRemover {
+        helper.isAvailable ? HelperRootRemover(client: helper) : AdminRootRemover()
+    }
+
+    /// Runs an allow-listed tool as root, the same way.
+    func rootRunner() -> @Sendable (String, [String]) async -> (Int32, String, String) {
+        let helper = helper
+        let useHelper = helper.isAvailable
+        return { tool, arguments in
+            useHelper ? await helper.run(tool: tool, arguments: arguments)
+                      : await AdminAuthorizedRunner.shared.run(tool: tool, arguments: arguments)
+        }
     }
 
     var bootVolume: VolumeInfo? { volumes.first(where: \.isRoot) }
@@ -117,11 +145,8 @@ final class AppModel {
 /// `UserDefaults` keys used by Settings. Kept in one place so CleanCore-facing code and views agree.
 enum SettingsKey {
     static let appearance = "appearance"
-    static let detectTrashedApps = "detectTrashedApps"
     static let showSystemApps = "showSystemApps"
     static let removalMethod = "removalMethod"               // "trash" | "permanent"
-    static let remindUnusedApps = "remindUnusedApps"
-    static let showSummaryAfterRemoval = "showSummaryAfterRemoval"
     static let outdatedMonths = "outdatedMonths"
     static let scanLocations = "scanLocations"               // [String]
     static let skipList = "skipList"                         // [String]
@@ -131,17 +156,22 @@ enum SettingsKey {
     static let sessionCount = "sessionCount"                 // launches so far; drives the Ko-fi nudge
     static let supportPromptLastShown = "supportPromptLastShown" // Date of the last "Maybe later"
     static let supportPromptDisabled = "supportPromptDisabled"   // "Don't ask again" or the tip page was opened
+    static let fullDiskAccessPromptDismissed = "fullDiskAccessPromptDismissed"
+    static let lastLaunchedVersion = "lastLaunchedVersion"
+    static let expertMode = "expertMode"
+    static let showLowConfidenceRemains = "showLowConfidenceRemains"
+
+    /// Preferences "Reset Application Settings" restores; the launch count, the Ko-fi choice and Sparkle's keys stay.
+    static let resettable = [appearance, showSystemApps, removalMethod, outdatedMonths, scanLocations, skipList, skipListUpdates,
+                             includeNetworkVolumes, enabledVolumeIDs, fullDiskAccessPromptDismissed, expertMode, showLowConfidenceRemains]
 
     static let defaultScanLocations = ["/Applications", NSHomeDirectory() + "/Applications", "/System/Applications"]
 
     static func registerDefaults() {
         UserDefaults.standard.register(defaults: [
             appearance: AppearanceMode.auto.rawValue,
-            detectTrashedApps: true,
             showSystemApps: false,
             removalMethod: "trash",
-            remindUnusedApps: true,
-            showSummaryAfterRemoval: true,
             outdatedMonths: 3,
             scanLocations: defaultScanLocations,
             skipList: [String](),

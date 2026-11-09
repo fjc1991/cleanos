@@ -50,6 +50,6 @@ import Testing
 
     @Test func maintenanceWithoutHelperReportsNeedForPrivileges() async {
         let runner = MaintenanceRunner()
-        #expect(await runner.run(.optimizeRAM) != nil || FileRemover.isDryRun)
+        #expect(await runner.run(.reindexSpotlight(mount: "/")) != nil || FileRemover.isDryRun)
     }
 }

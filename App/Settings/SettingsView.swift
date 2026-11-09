@@ -59,7 +59,6 @@ struct GeneralSettingsView: View {
         }
         watcherStatus = service.status
         watcherEnabled = service.status == .enabled
-        UserDefaults.standard.set(watcherEnabled, forKey: SettingsKey.detectTrashedApps)
     }
 }
 
@@ -185,8 +184,6 @@ struct SkipListSettingsView: View {
 
 struct RemoveSettingsView: View {
     @AppStorage(SettingsKey.removalMethod) private var removalMethod = "trash"
-    @AppStorage(SettingsKey.remindUnusedApps) private var remindUnusedApps = true
-    @AppStorage(SettingsKey.showSummaryAfterRemoval) private var showSummary = true
 
     var body: some View {
         Form {
@@ -194,7 +191,7 @@ struct RemoveSettingsView: View {
                 Picker("", selection: $removalMethod) {
                     VStack(alignment: .leading) {
                         Text("Move to Trash")
-                        Text("Move items to Trash during removal. Everything can be restored from History.").font(.caption).foregroundStyle(.secondary)
+                        Text("Items go to the Trash and can be put back from History. Things already in a Trash, and system settings, are removed for good.").font(.caption).foregroundStyle(.secondary)
                     }.tag("trash")
                     VStack(alignment: .leading) {
                         Text("Delete items permanently")
@@ -203,12 +200,6 @@ struct RemoveSettingsView: View {
                 }
                 .pickerStyle(.radioGroup)
                 .labelsHidden()
-            }
-            Section("Notifications") {
-                Toggle("Remind me to clean up unused apps", isOn: $remindUnusedApps)
-            }
-            Section("Confirmation") {
-                Toggle("Show detailed summary after successful removal or update", isOn: $showSummary)
             }
         }
         .formStyle(.grouped)
@@ -227,7 +218,7 @@ struct DiskAccessSettingsView: View {
                 VStack(alignment: .leading) {
                     Text(model.fullDiskAccess == .granted ? "Full Disk Access is granted" : "Full Disk Access is not granted")
                         .font(.headline)
-                    Text("Needed to scan caches, service files, hidden folders on external disks and the Trash of every volume.")
+                    Text("Needed to scan caches, service files, hidden folders on external disks and the Trash of every volume. It also lets CleanOS remove other apps, which macOS otherwise allows only under App Management.")
                         .font(.callout).foregroundStyle(.secondary)
                 }
             }
@@ -235,11 +226,17 @@ struct DiskAccessSettingsView: View {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("1. Click the button below to open Privacy & Security → Full Disk Access.")
                     Text("2. Turn on CleanOS. If it is not listed, click + and pick CleanOS from Applications.")
-                    Text("3. Switch back to CleanOS; the status updates automatically.")
+                    Text("3. If CleanOS is listed and on but this still says not granted (it happens after an update), select it, click −, then add it again.")
+                    Text("4. Switch back to CleanOS; the status updates automatically.")
                 }
                 .font(.callout)
                 Button("Open System Settings") { NSWorkspace.shared.open(FullDiskAccess.settingsURL) }
                     .buttonStyle(PrimaryActionButtonStyle())
+            }
+            Divider()
+            HStack {
+                Text("Without Full Disk Access, allow CleanOS under App Management so it can remove other apps.").font(.callout).foregroundStyle(.secondary)
+                Button("Open App Management") { NSWorkspace.shared.open(RemovalSheet.appManagementURL) }
             }
             Spacer()
         }
@@ -272,8 +269,9 @@ struct AdvancedSettingsView: View {
                 Button("Reset Application Settings") { showResetConfirmation = true }
                     .confirmationDialog("Reset all CleanOS settings to their defaults?", isPresented: $showResetConfirmation) {
                         Button("Reset", role: .destructive) {
+                            // Only CleanOS' own preferences: the launch count, the Ko-fi choice and the updater's settings stay.
                             let defaults = UserDefaults.standard
-                            for key in defaults.dictionaryRepresentation().keys { defaults.removeObject(forKey: key) }
+                            for key in SettingsKey.resettable { defaults.removeObject(forKey: key) }
                             SettingsKey.registerDefaults()
                         }
                     }
@@ -291,44 +289,49 @@ struct HelperSettingsView: View {
         let helper = model.helper
         VStack(alignment: .leading, spacing: 14) {
             HStack(spacing: 10) {
-                Image(systemName: helper.isAvailable ? "checkmark.shield.fill" : "wrench.and.screwdriver")
+                Image(systemName: helper.isAvailable ? "checkmark.shield.fill" : "lock.shield")
                     .font(.title).foregroundStyle(helper.isAvailable ? Theme.success : Theme.accent)
                 VStack(alignment: .leading) {
-                    Text(statusTitle(helper.status)).font(.headline)
-                    Text("The helper runs with administrator privileges to remove files owned by the system (launch daemons, privileged helpers, /Library caches), delete snapshots, reindex Spotlight and reset system permissions. It only accepts connections from CleanOS.")
+                    Text(helper.isAvailable ? "The CleanOS helper is installed" : "Administrator actions ask for your password").font(.headline)
+                    Text("Apps installed for all users, system daemons and files owned by the system need administrator rights. Without the helper, macOS asks for your password once per removal. The helper does that work without asking each time, and only accepts requests from this copy of CleanOS.")
                         .font(.callout).foregroundStyle(.secondary)
                 }
             }
-            if let version = helper.version { Text("Helper version \(version)").font(.caption).foregroundStyle(.secondary) }
-            if let error = helper.lastError { Text(error).font(.caption).foregroundStyle(Theme.danger) }
-            HStack {
-                if helper.isAvailable {
-                    Button("Disable Helper") { Task { await helper.unregister() } }
-                    Button("Check Version") { Task { await helper.checkVersion() } }
-                } else {
-                    Button("Enable Helper") { helper.register() }.buttonStyle(PrimaryActionButtonStyle())
-                    if helper.status == .requiresApproval {
-                        Button("Open Login Items Settings") { SMAppService.openSystemSettingsLoginItems() }
+            if helper.isSupported {
+                Text(statusTitle(helper.status)).font(.callout)
+                if let version = helper.version { Text("Helper version \(version)").font(.caption).foregroundStyle(.secondary) }
+                if let error = helper.lastError { Text(error).font(.caption).foregroundStyle(Theme.danger) }
+                HStack {
+                    if helper.status == .enabled {
+                        Button("Remove Helper") { Task { await helper.unregister() } }
+                        if !helper.isVerified { Button("Reinstall Helper") { Task { await helper.reinstall() } }.buttonStyle(PrimaryActionButtonStyle()) }
+                    } else {
+                        Button("Install Helper") { helper.register(); Task { await helper.refreshAndVerify() } }.buttonStyle(PrimaryActionButtonStyle())
+                        if helper.status == .requiresApproval {
+                            Button("Open Login Items Settings") { SMAppService.openSystemSettingsLoginItems() }
+                        }
                     }
                 }
-                Button("Refresh") { helper.refresh() }
+                Text("macOS asks you to allow \"CleanOS\" under System Settings → General → Login Items & Extensions the first time.")
+                    .font(.caption).foregroundStyle(.tertiary)
+            } else {
+                Text("This build of CleanOS is not signed with a certificate the helper can trust, so it always uses the password prompt instead. Nothing needs to be set up.")
+                    .font(.callout).foregroundStyle(.secondary)
             }
-            Text("macOS asks you to allow \"CleanOS\" under System Settings → General → Login Items & Extensions the first time. Development builds signed ad hoc may be refused by macOS; a Developer ID build is required for distribution.")
-                .font(.caption).foregroundStyle(.tertiary)
             Spacer()
         }
         .padding(24)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .task { helper.refresh(); if helper.isAvailable { await helper.checkVersion() } }
+        .task { await helper.refreshAndVerify() }
     }
 
     private func statusTitle(_ status: HelperClient.Status) -> String {
         switch status {
-        case .enabled: "Helper is enabled"
-        case .requiresApproval: "Helper needs approval in System Settings"
-        case .notRegistered: "Helper is not enabled"
-        case .notFound: "Helper is missing from the app bundle"
-        case .unknown: "Helper status unknown"
+        case .enabled: model.helper.isVerified ? "Installed and answering." : "Installed, but not answering."
+        case .requiresApproval: "Waiting for your approval in System Settings."
+        case .notRegistered: "Not installed."
+        case .notFound: "The helper is missing from the app bundle."
+        case .unknown: "Status unknown."
         }
     }
 }
@@ -345,7 +348,7 @@ struct UpdatesSettingsView: View {
                 Toggle("Check for updates automatically", isOn: $updater.automaticallyChecksForUpdates)
                 Toggle("Download and install updates automatically", isOn: $updater.automaticallyDownloadsUpdates)
                     .disabled(!updater.automaticallyChecksForUpdates)
-                Text("CleanOS looks for a new version once a day. With automatic installation the update downloads in the background and you are asked before it is installed; otherwise you are told about it and choose when to install.")
+                Text("CleanOS looks for a new version once a day. With automatic installation the update downloads in the background and is installed the next time you quit CleanOS; otherwise you are told about it and choose when to install.")
                     .font(.caption).foregroundStyle(.secondary)
             } header: { Text("Software updates") }
             Section {
@@ -393,11 +396,10 @@ struct AboutSettingsView: View {
                     .buttonStyle(PrimaryActionButtonStyle())
                 Text("Used in \(model.support.sessionCount) sessions so far.")
                     .font(.caption).foregroundStyle(.tertiary)
-            } else {
-                Text("Set CLEANOS_KOFI_NAME in project.yml to enable the tip link.")
-                    .font(.caption).foregroundStyle(.tertiary)
             }
             Spacer()
+            Text("CleanOS is open source under the MIT License. It includes Sparkle (MIT License, © the Sparkle Project contributors).")
+                .font(.caption).foregroundStyle(.tertiary).multilineTextAlignment(.center)
         }
         .padding(24)
         .frame(maxWidth: .infinity)

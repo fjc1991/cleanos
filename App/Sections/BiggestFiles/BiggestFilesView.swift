@@ -91,7 +91,7 @@ struct BiggestFilesView: View {
         } footer: {
             let items = model.selectedItems
             if !items.isEmpty { Text("\(items.count) items · \(items.reduce(0) { $0 + $1.size }.formattedBytes)").font(.callout.monospacedDigit()).foregroundStyle(.secondary).padding(.trailing, 8) }
-            Button(AppSection.biggestFiles.actionTitle) { removalFlow = RemovalFlow(title: "Remove biggest files", apps: [], items: items, quit: { true }) }
+            Button(AppSection.biggestFiles.actionTitle) { removalFlow = RemovalFlow(title: "Remove biggest files", apps: [], items: items) }
                 .buttonStyle(PrimaryActionButtonStyle()).disabled(items.isEmpty)
         }
         .task { await model.scan(volumes: appModel.volumes) }

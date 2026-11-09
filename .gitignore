@@ -19,3 +19,6 @@ CleanOS.xcodeproj/
 *.key
 *.pem
 sparkle_private*
+
+# Agent worktrees
+.claude/worktrees/

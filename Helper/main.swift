@@ -1,8 +1,49 @@
 import Foundation
 import HelperProtocol
 
-/// Privileged helper daemon registered with `SMAppService.daemon`. Runs as root, exposes
-/// `CleanOSHelperProtocol` over XPC and refuses connections from anything that is not CleanOS.
+// The privileged side of CleanOS. It runs in one of two ways:
+//  • launchd daemon (no arguments): registered with SMAppService and serving `CleanOSHelperProtocol` over XPC,
+//    only to a CleanOS signed with the same certificate as this helper;
+//  • one-shot (`--request <base64 JSON> --output <file>`): started by CleanOS through the macOS administrator
+//    password prompt. It performs one `HelperRequest`, writes the JSON `HelperResponse` and exits.
+// Both delegate the actual work, and all input validation, to `HelperCore`.
+
+/// One request, started through the administrator prompt.
+enum OneShot {
+    static func run(_ arguments: [String]) -> Int32 {
+        func value(after flag: String) -> String? {
+            guard let index = arguments.firstIndex(of: flag), index + 1 < arguments.count else { return nil }
+            return arguments[index + 1]
+        }
+        guard let encoded = value(after: "--request"), let data = Data(base64Encoded: encoded),
+              let request = try? JSONDecoder().decode(HelperRequest.self, from: data),
+              let output = value(after: "--output") else {
+            FileHandle.standardError.write(Data("usage: com.cleanos.helper --request <base64 JSON> --output <file>\n".utf8))
+            return 64
+        }
+        guard let response = try? JSONEncoder().encode(HelperCore.handle(request)) else { return 70 }
+        return write(response, to: output) ? 0 : 73
+    }
+
+    /// Writes the response into the caller's private folder without following symlinks: the folder must belong to an
+    /// ordinary user and be closed to everyone else, the file is created exclusively and then renamed into place.
+    static func write(_ data: Data, to output: String) -> Bool {
+        let url = URL(filePath: output)
+        let folder = url.deletingLastPathComponent().path
+        var info = stat()
+        guard url.pathExtension == "json", lstat(folder, &info) == 0, (info.st_mode & S_IFMT) == S_IFDIR,
+              info.st_uid != 0, info.st_mode & 0o077 == 0 else { return false }
+        let partial = output + ".partial"
+        let fd = open(partial, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0o644)
+        guard fd >= 0 else { return false }
+        let written = data.withUnsafeBytes { Foundation.write(fd, $0.baseAddress, $0.count) }
+        fchown(fd, info.st_uid, info.st_gid)
+        close(fd)
+        return written == data.count && rename(partial, output) == 0
+    }
+}
+
+/// XPC service object for one connection.
 final class HelperService: NSObject, CleanOSHelperProtocol {
     let callerUID: uid_t
     let callerGID: gid_t
@@ -17,191 +58,61 @@ final class HelperService: NSObject, CleanOSHelperProtocol {
         reply(version, HelperConstants.protocolVersion)
     }
 
-    func remove(paths: [String], permanently: Bool, reply: @escaping @Sendable ([String: String]) -> Void) {
-        var results: [String: String] = [:]
-        for path in paths {
-            guard ProtectedPaths.isAllowed(path) else {
-                results[path] = "Refused: protected location"
-                continue
-            }
-            if ProcessInfo.processInfo.environment["CLEANOS_DRY_RUN"] == "1" {
-                results[path] = ""
-                continue
-            }
-            do {
-                if permanently {
-                    try FileManager.default.removeItem(atPath: path)
-                    results[path] = ""
-                } else {
-                    let destination = try TrashLocator.trash(path, uid: callerUID, gid: callerGID)
-                    results[path] = destination
-                }
-            } catch {
-                results[path] = error.localizedDescription
-            }
+    func perform(_ data: Data, reply: @escaping @Sendable (Data) -> Void) {
+        let response: HelperResponse
+        switch try? JSONDecoder().decode(HelperRequest.self, from: data) {
+        case .remove(let items, _, _)?:
+            // Removed items go to the Trash of whoever connected, whatever the request says.
+            response = HelperCore.handle(.remove(items: items, uid: callerUID, gid: callerGID))
+        case let request?:
+            response = HelperCore.handle(request)
+        case nil:
+            response = .failed("The helper could not read the request.")
         }
-        reply(results)
-    }
-
-    func run(tool: String, arguments: [String], reply: @escaping @Sendable (Int32, String, String) -> Void) {
-        guard let executable = HelperConstants.allowedTools[tool] else {
-            reply(-1, "", "Refused: \(tool) is not a whitelisted tool")
-            return
-        }
-        let process = Process()
-        process.executableURL = URL(filePath: executable)
-        process.arguments = arguments
-        let out = Pipe(), err = Pipe()
-        process.standardOutput = out
-        process.standardError = err
-        do {
-            try process.run()
-        } catch {
-            reply(-1, "", error.localizedDescription)
-            return
-        }
-        let stdout = String(data: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        let stderr = String(data: err.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        process.waitUntilExit()
-        reply(process.terminationStatus, stdout, stderr)
-    }
-
-    func readFile(atPath path: String, reply: @escaping @Sendable (Data?, String?) -> Void) {
-        guard ReadablePaths.isAllowed(path) else {
-            reply(nil, "Refused: \(path) is not readable through the helper")
-            return
-        }
-        do {
-            reply(try Data(contentsOf: URL(filePath: path)), nil)
-        } catch {
-            reply(nil, error.localizedDescription)
-        }
+        reply((try? JSONEncoder().encode(response)) ?? Data())
     }
 }
 
-/// Paths the helper will never remove, whatever the app asks.
-enum ProtectedPaths {
-    static let prefixes = ["/System/", "/usr/bin/", "/usr/sbin/", "/usr/lib/", "/usr/libexec/", "/usr/share/", "/bin/", "/sbin/",
-                           "/private/etc/", "/etc/", "/Library/Apple/", "/private/var/db/", "/dev/", "/Volumes/Recovery/"]
-    static let exact: Set<String> = ["/", "/Applications", "/Library", "/Users", "/Volumes", "/private", "/private/var", "/opt", "/usr/local"]
-
-    static func isAllowed(_ path: String) -> Bool {
-        let standardized = URL(filePath: path).standardizedFileURL.path
-        if exact.contains(standardized) { return false }
-        if standardized.contains("/../") || !standardized.hasPrefix("/") { return false }
-        for prefix in prefixes where standardized.hasPrefix(prefix) { return false }
-        if standardized.hasPrefix("/private/etc/") || standardized.hasPrefix("/etc/") { return false }
-        if standardized.contains("com.apple.") && standardized.hasPrefix("/Library/") && !standardized.contains("/Caches/") && !standardized.contains("/Logs/") {
-            return false
-        }
-        return true
-    }
-}
-
-/// Root-only files the app may read through the helper.
-enum ReadablePaths {
-    static let allowed: Set<String> = [
-        "/Library/Application Support/com.apple.TCC/TCC.db",
-        "/private/var/db/com.apple.xpc.launchd/disabled.plist",
-    ]
-    static let allowedPrefixes = ["/private/var/db/receipts/", "/Library/Preferences/", "/private/var/db/com.apple.xpc.launchd/",
-                                  "/Library/LaunchDaemons/", "/Library/LaunchAgents/"]
-
-    static func isAllowed(_ path: String) -> Bool {
-        let standardized = URL(filePath: path).standardizedFileURL.path
-        if allowed.contains(standardized) { return true }
-        return allowedPrefixes.contains { standardized.hasPrefix($0) }
-    }
-}
-
-/// Moves root-owned items into the calling user's Trash on the same volume and hands ownership back.
-enum TrashLocator {
-    static func trash(_ path: String, uid: uid_t, gid: gid_t) throws -> String {
-        let source = URL(filePath: path)
-        let fm = FileManager.default
-        let volumeRoot = try source.resourceValues(forKeys: [.volumeURLKey]).volume ?? URL(filePath: "/")
-        let trashDirectory: URL
-        if volumeRoot.path == "/" {
-            guard let home = NSHomeDirectoryForUser(userName(for: uid)) else { throw HelperError.noHome }
-            trashDirectory = URL(filePath: home).appending(path: ".Trash")
-        } else {
-            trashDirectory = volumeRoot.appending(path: ".Trashes/\(uid)")
-        }
-        try fm.createDirectory(at: trashDirectory, withIntermediateDirectories: true, attributes: [.ownerAccountID: uid, .groupOwnerAccountID: gid, .posixPermissions: 0o700])
-        var destination = trashDirectory.appending(path: source.lastPathComponent)
-        var counter = 1
-        while fm.fileExists(atPath: destination.path) {
-            counter += 1
-            let name = source.deletingPathExtension().lastPathComponent + " \(counter)"
-            destination = trashDirectory.appending(path: name).appendingPathExtension(source.pathExtension)
-        }
-        try fm.moveItem(at: source, to: destination)
-        try chownRecursively(destination, uid: uid, gid: gid)
-        return destination.path
-    }
-
-    static func userName(for uid: uid_t) -> String {
-        guard let pw = getpwuid(uid) else { return "" }
-        return String(cString: pw.pointee.pw_name)
-    }
-
-    static func chownRecursively(_ url: URL, uid: uid_t, gid: gid_t) throws {
-        lchown(url.path, uid, gid)
-        guard let enumerator = FileManager.default.enumerator(at: url, includingPropertiesForKeys: nil) else { return }
-        for case let child as URL in enumerator { lchown(child.path, uid, gid) }
-    }
-
-    enum HelperError: Error { case noHome }
-}
-
-/// Accepts connections only from a process whose code signature matches CleanOS.
+/// Accepts connections only from CleanOS signed with this helper's own certificate (checked by the system against
+/// the connection's audit token, see `setConnectionCodeSigningRequirement`). An ad-hoc signed release accepts nobody.
 final class ListenerDelegate: NSObject, NSXPCListenerDelegate {
+    let isAccepting: Bool
+    init(isAccepting: Bool) { self.isAccepting = isAccepting }
+
     func listener(_ listener: NSXPCListener, shouldAcceptNewConnection connection: NSXPCConnection) -> Bool {
-        guard CodeSignatureValidator.isTrusted(pid: connection.processIdentifier) else {
-            NSLog("CleanOS helper: refused connection from pid \(connection.processIdentifier)")
+        guard isAccepting else {
+            NSLog("CleanOS helper: refused pid \(connection.processIdentifier); this helper is not signed with a certificate")
             return false
         }
         connection.exportedInterface = NSXPCInterface(with: CleanOSHelperProtocol.self)
-        connection.exportedObject = HelperService(callerUID: connection.effectiveUserIdentifier,
-                                                  callerGID: connection.effectiveGroupIdentifier)
+        connection.exportedObject = HelperService(callerUID: connection.effectiveUserIdentifier, callerGID: connection.effectiveGroupIdentifier)
         connection.resume()
         return true
     }
 }
 
-enum CodeSignatureValidator {
-    /// Release builds require a Developer ID signature for `com.cleanos.app` from the same team as the helper.
-    /// Debug builds accept any process whose signing identifier is `com.cleanos.app`, so ad-hoc signed
-    /// development builds can talk to the helper.
-    static func isTrusted(pid: pid_t) -> Bool {
-        var code: SecCode?
-        let attributes = [kSecGuestAttributePid: pid] as CFDictionary
-        guard SecCodeCopyGuestWithAttributes(nil, attributes, [], &code) == errSecSuccess, let code else { return false }
+enum ClientRequirement {
+    /// Requirement every connecting process must meet, or nil when no safe requirement exists.
+    static var text: String? {
+        let leaf = CodeIdentity.leafCertificateHash()
         #if DEBUG
-        let requirementText = "identifier \"\(HelperConstants.appBundleIdentifier)\""
+        return CodeIdentity.requirement(identifier: HelperConstants.appBundleIdentifier, pinnedTo: leaf)
         #else
-        let requirementText = "identifier \"\(HelperConstants.appBundleIdentifier)\" and anchor apple generic and certificate leaf[subject.OU] = \"\(teamIdentifier())\""
+        guard let leaf else { return nil }
+        return CodeIdentity.requirement(identifier: HelperConstants.appBundleIdentifier, pinnedTo: leaf)
         #endif
-        var requirement: SecRequirement?
-        guard SecRequirementCreateWithString(requirementText as CFString, [], &requirement) == errSecSuccess, let requirement else { return false }
-        return SecCodeCheckValidity(code, [], requirement) == errSecSuccess
-    }
-
-    static func teamIdentifier() -> String {
-        var selfCode: SecCode?
-        guard SecCodeCopySelf([], &selfCode) == errSecSuccess, let selfCode else { return "" }
-        var staticCode: SecStaticCode?
-        guard SecCodeCopyStaticCode(selfCode, [], &staticCode) == errSecSuccess, let staticCode else { return "" }
-        var info: CFDictionary?
-        guard SecCodeCopySigningInformation(staticCode, SecCSFlags(rawValue: kSecCSSigningInformation), &info) == errSecSuccess,
-              let dict = info as? [String: Any] else { return "" }
-        return dict[kSecCodeInfoTeamIdentifier as String] as? String ?? ""
     }
 }
 
+if CommandLine.arguments.contains("--request") {
+    exit(OneShot.run(CommandLine.arguments))
+}
+
 let listener = NSXPCListener(machServiceName: HelperConstants.machServiceName)
-let delegate = ListenerDelegate()
+let requirement = ClientRequirement.text
+if let requirement { listener.setConnectionCodeSigningRequirement(requirement) }
+let delegate = ListenerDelegate(isAccepting: requirement != nil)
 listener.delegate = delegate
 listener.resume()
-NSLog("CleanOS helper started (protocol \(HelperConstants.protocolVersion))")
+NSLog("CleanOS helper started (protocol \(HelperConstants.protocolVersion), requirement: \(requirement ?? "none, refusing all"))")
 RunLoop.main.run()

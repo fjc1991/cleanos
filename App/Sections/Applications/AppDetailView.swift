@@ -61,7 +61,7 @@ struct AppDetailView: View {
                     HStack(spacing: 6) {
                         Label(model.isRunning(app) ? "Running" : "\(background.count) background process\(background.count == 1 ? "" : "es")", systemImage: "circle.fill")
                             .font(.caption).foregroundStyle(Theme.success)
-                        Button("Force Stop") { Task { _ = await model.quit(app) } }.controlSize(.mini)
+                        Button("Force Stop") { Task { _ = await model.quit([app]) } }.controlSize(.mini)
                             .help(background.map { "\($0.name) (pid \($0.pid))" }.joined(separator: "\n"))
                     }
                 }

@@ -11,7 +11,9 @@ final class WatcherAppDelegate: NSObject, NSApplicationDelegate, UNUserNotificat
     private var folderWatchers: [DirectoryWatcher] = []
     private var knownTrashEntries: Set<String> = []
     private var knownApps: [String: InstalledApp] = [:]
-    private var pending: [String: (app: InstalledApp, result: LeftoverScanResult)] = [:]
+    private var pending: [String: (app: InstalledApp, result: LeftoverScanResult, offeredAt: Date)] = [:]
+    /// Offers older than this only open the review in CleanOS: the disk may have changed since.
+    private let offerLifetime: TimeInterval = 24 * 3600
     private let catalog = AppCatalog()
     private let locator = LeftoverLocator()
     private let journal = RemovalJournal()
@@ -66,17 +68,35 @@ final class WatcherAppDelegate: NSObject, NSApplicationDelegate, UNUserNotificat
         }
     }
 
+    private func currentAppPaths() -> Set<String> {
+        Set(AppCatalog.findAppBundles(in: AppSettingsBridge.scanLocations.map { URL(filePath: $0) }, skipList: []).map { $0.standardizedFileURL.path })
+    }
+
+    /// Fallback when ~/.Trash is unreadable: an app that disappeared from the app folders. Updaters, renames and moves
+    /// make apps vanish briefly too, so it only counts after half a minute with no copy of that app anywhere.
     private func foldersChanged() async {
         try? await Task.sleep(for: .seconds(2))
-        let current = Set(AppCatalog.findAppBundles(in: AppSettingsBridge.scanLocations.map { URL(filePath: $0) }, skipList: []).map { $0.standardizedFileURL.path })
-        let removed = Set(knownApps.keys).subtracting(current)
-        for path in removed {
-            guard let app = knownApps[path] else { continue }
-            knownApps[path] = nil
-            await offer(app: app)
-        }
+        let current = currentAppPaths()
         for path in current.subtracting(knownApps.keys) {
             if let app = AppCatalog.makeApp(url: URL(filePath: path), shared: Rules.bundled.shared, cachedIdentity: nil) { knownApps[path] = app }
+        }
+        let removed = Set(knownApps.keys).subtracting(current)
+        guard !removed.isEmpty else { return }
+        try? await Task.sleep(for: .seconds(30))
+        let stillGone = removed.subtracting(currentAppPaths())
+        for path in stillGone {
+            guard let app = knownApps[path] else { continue }
+            knownApps[path] = nil
+            guard !Self.isInstalledElsewhere(bundleID: app.bundleID) else { continue }
+            await offer(app: app, trashed: false)
+        }
+    }
+
+    /// True when Launch Services knows a copy of the app outside any Trash (a reinstall, an update, another folder).
+    static func isInstalledElsewhere(bundleID: String) -> Bool {
+        NSWorkspace.shared.urlsForApplications(withBundleIdentifier: bundleID).contains { url in
+            let path = url.standardizedFileURL.path
+            return !path.contains("/.Trash/") && !path.contains("/.Trashes/") && FileManager.default.fileExists(atPath: path)
         }
     }
 
@@ -86,18 +106,25 @@ final class WatcherAppDelegate: NSObject, NSApplicationDelegate, UNUserNotificat
         let app = original ?? InstalledApp(url: url, name: identity.name, bundleID: identity.bundleID, version: nil, build: nil, isSystem: false,
                                            modificationDate: nil, creationDate: nil, lastOpenedDate: nil, identity: identity)
         if let original { knownApps[original.url.standardizedFileURL.path] = nil }
-        await offer(app: app)
+        // A duplicate (a second copy, an old version from a disk image) went to the Trash: the app is still installed.
+        try? await Task.sleep(for: .seconds(2))
+        guard !Self.isInstalledElsewhere(bundleID: identity.bundleID) else { return }
+        await offer(app: app, trashed: true)
     }
 
-    private func offer(app: InstalledApp) async {
-        let result = await locator.locate(app: app, otherApps: Array(knownApps.values), includeExecutable: false)
-        let items = result.defaultSelection
+    private func locate(_ app: InstalledApp) async -> LeftoverScanResult {
+        await locator.locate(app: app, otherApps: Array(knownApps.values), includeExecutable: false, skipList: AppSettingsBridge.skipList)
+    }
+
+    private func offer(app: InstalledApp, trashed: Bool) async {
+        let result = await locate(app)
+        let items = result.defaultSelection.filter { !$0.needsRoot }
         guard !items.isEmpty else { return }
         let size = items.reduce(0) { $0 + $1.size }
         let id = UUID().uuidString
-        pending[id] = (app, result)
+        pending[id] = (app, result, .now)
         let content = UNMutableNotificationContent()
-        content.title = "\(app.name) was moved to Trash"
+        content.title = trashed ? "\(app.name) was moved to the Trash" : "\(app.name) was removed"
         content.body = "\(items.count) leftover file\(items.count == 1 ? "" : "s") (\(size.formattedBytes)) remain on your disk."
         content.categoryIdentifier = "trashedApp"
         content.userInfo = ["bundleID": app.bundleID]
@@ -124,22 +151,40 @@ final class WatcherAppDelegate: NSObject, NSApplicationDelegate, UNUserNotificat
     }
 
     private func handleResponse(id: String, action: String) async {
-        guard let entry = pending[id] else { return }
+        guard let entry = pending[id] else {
+            if action == "remove" { await notify("Nothing was removed", "This notification is too old. Open CleanOS → Applications → Remains to review leftovers.") }
+            return
+        }
         switch action {
-        case "remove":
-            let plan = RemovalPlan(selected: entry.result.defaultSelection.filter { !$0.needsRoot }, permanently: false)
-            let outcome = await RemovalExecutor(journal: journal).execute(plan, title: "Leftovers of \(entry.app.name)", appVersion: "watcher")
-            let content = UNMutableNotificationContent()
-            content.title = "Leftovers of \(entry.app.name) removed"
-            content.body = "\(outcome.succeeded.count) item\(outcome.succeeded.count == 1 ? "" : "s") moved to Trash, \(outcome.freedBytes.formattedBytes) freed." + (outcome.failed.isEmpty ? "" : " \(outcome.failed.count) could not be removed.")
-            try? await UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil))
+        case "remove" where Date().timeIntervalSince(entry.offeredAt) < offerLifetime:
             pending[id] = nil
+            // Check again at click time: the app may be back, and the disk may have changed since the notification.
+            guard !Self.isInstalledElsewhere(bundleID: entry.app.bundleID) else {
+                await notify("Nothing was removed", "\(entry.app.name) is installed again, so its files are still in use.")
+                return
+            }
+            let offered = Set(entry.result.defaultSelection.map(\.id))
+            let current = await locate(entry.app).defaultSelection.filter { offered.contains($0.id) && !$0.needsRoot }
+            let plan = RemovalPlan(selected: current, permanently: false)
+            let outcome = await RemovalExecutor(journal: journal).execute(plan, title: "Leftovers of \(entry.app.name)", appVersion: "watcher")
+            await notify("Leftovers of \(entry.app.name) removed",
+                         "\(outcome.succeeded.count) item\(outcome.succeeded.count == 1 ? "" : "s") moved to the Trash (\(outcome.trashedBytes.formattedBytes)); restore them from CleanOS → History."
+                         + (outcome.failed.isEmpty ? "" : " \(outcome.failed.count) could not be removed."))
         default:
             if var components = URLComponents(string: "cleanos://remains") {
                 components.queryItems = [URLQueryItem(name: "bundleID", value: entry.app.bundleID)]
                 if let url = components.url { NSWorkspace.shared.open(url) }
             }
         }
+    }
+}
+
+extension WatcherAppDelegate {
+    func notify(_ title: String, _ body: String) async {
+        let content = UNMutableNotificationContent()
+        content.title = title
+        content.body = body
+        try? await UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil))
     }
 }
 
@@ -167,6 +212,13 @@ enum AppSettingsBridge {
         let defaults = UserDefaults(suiteName: HelperConstants.appBundleIdentifier)
         if let data = defaults?.data(forKey: "scanLocations"), let list = try? JSONDecoder().decode([String].self, from: data), !list.isEmpty { return list }
         return ["/Applications", NSHomeDirectory() + "/Applications"]
+    }
+
+    /// The user's Skip List: folders that must never be offered for removal.
+    static var skipList: [String] {
+        let defaults = UserDefaults(suiteName: HelperConstants.appBundleIdentifier)
+        if let data = defaults?.data(forKey: "skipList"), let list = try? JSONDecoder().decode([String].self, from: data) { return list }
+        return defaults?.stringArray(forKey: "skipList") ?? []
     }
 }
 

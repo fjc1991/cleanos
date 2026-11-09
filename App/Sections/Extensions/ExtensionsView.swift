@@ -119,7 +119,7 @@ struct ExtensionsView: View {
         } footer: {
             let items = model.selectedItems
             if !items.isEmpty { Text("\(items.count) items · \(items.reduce(0) { $0 + $1.size }.formattedBytes)").font(.callout.monospacedDigit()).foregroundStyle(.secondary).padding(.trailing, 8) }
-            Button("Remove") { removalFlow = RemovalFlow(title: "Remove extensions", apps: [], items: items, quit: { true }) }
+            Button("Remove") { removalFlow = RemovalFlow(title: "Remove extensions", apps: [], items: items) }
                 .buttonStyle(PrimaryActionButtonStyle()).disabled(items.isEmpty)
         }
         .task { model.appProvider = { await appModel.installedApps() }; await model.scanAll(volumes: appModel.volumes) }

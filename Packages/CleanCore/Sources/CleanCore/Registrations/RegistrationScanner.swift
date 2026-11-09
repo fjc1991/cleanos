@@ -1,4 +1,5 @@
 import Foundation
+import HelperProtocol
 import Security
 import SQLite3
 
@@ -169,6 +170,40 @@ public struct SystemRegistrationReader: RegistrationReader {
         process.waitUntilExit()
         return String(data: data, encoding: .utf8)
     }
+
+    /// Runs a tool and returns its exit status and both outputs (drained concurrently), for callers that must know
+    /// whether it worked.
+    public static func runChecked(_ executable: String, _ arguments: [String]) -> ToolResult {
+        HelperCore.run(executable: executable, arguments: arguments)
+    }
+}
+
+/// How a Launch Services handler entry is identified: by what it handles and which app it points at, never by its
+/// position in the array (positions shift as soon as one entry is removed).
+public enum LaunchServicesHandlerPayload {
+    static let keys = ["LSHandlerURLScheme", "LSHandlerContentType", "LSHandlerContentTag"]
+
+    /// Payload for the handler entry, or nil when it has no subject.
+    public static func payload(for handler: [String: String], role: String) -> [String: String]? {
+        guard let key = keys.first(where: { handler[$0] != nil }), let value = handler[key] else { return nil }
+        let subject = switch key {
+        case "LSHandlerURLScheme": "URL scheme \(value)://"
+        case "LSHandlerContentType": "file type \(value)"
+        default: "extension .\(value)"
+        }
+        return ["type": "lsHandler", "subject": subject, "role": role, "matchKey": key, "matchValue": value]
+    }
+
+    public static func id(_ payload: [String: String]) -> String {
+        "registration:ls:\(payload["matchKey"] ?? ""):\(payload["matchValue"] ?? ""):\(payload["role"] ?? "")"
+    }
+
+    /// True when the stored entry is the one the payload describes.
+    static func matches(_ handler: [String: Any], _ payload: [String: String]) -> Bool {
+        guard let key = payload["matchKey"], let value = payload["matchValue"], let role = payload["role"]?.lowercased(),
+              (handler[key] as? String)?.lowercased() == value.lowercased() else { return false }
+        return handler.contains { $0.key.hasPrefix("LSHandlerRole") && ($0.value as? String)?.lowercased() == role }
+    }
 }
 
 /// Finds non-file traces of an app. Each result is a `.registration` item whose payload tells the remover what to undo.
@@ -193,16 +228,15 @@ public struct RegistrationScanner: Sendable {
         }
 
         // Launch Services handlers (URL schemes, content types).
-        for (index, handler) in reader.launchServicesHandlers().enumerated() {
+        var seenHandlers: Set<String> = []
+        for handler in reader.launchServicesHandlers() {
             let roles = handler.filter { $0.key.hasPrefix("LSHandlerRole") }
-            guard roles.values.contains(where: owns) else { continue }
-            let subject = handler["LSHandlerURLScheme"].map { "URL scheme \($0)://" }
-                ?? handler["LSHandlerContentType"].map { "file type \($0)" }
-                ?? handler["LSHandlerContentTag"].map { "extension .\($0)" } ?? "handler"
-            items.append(ScanItem(id: "registration:ls:\(index):\(subject)", title: "Default handler for \(subject)",
-                                  subtitle: "Launch Services → \(roles.values.first ?? "")", kind: .registration, group: Self.groupLaunchServices,
-                                  tier: .safe, matchedBy: ["Launch Services handler"],
-                                  payload: ["type": "lsHandler", "index": String(index), "subject": subject]))
+            guard let role = roles.values.first(where: owns), let payload = LaunchServicesHandlerPayload.payload(for: handler, role: role) else { continue }
+            let id = LaunchServicesHandlerPayload.id(payload)
+            guard seenHandlers.insert(id).inserted else { continue }
+            items.append(ScanItem(id: id, title: "Default handler for \(payload["subject"] ?? "a file type")",
+                                  subtitle: "Launch Services → \(role)", kind: .registration, group: Self.groupLaunchServices,
+                                  tier: .safe, matchedBy: ["Launch Services handler"], payload: payload))
         }
 
         // Dock tiles.
@@ -234,7 +268,7 @@ public struct RegistrationScanner: Sendable {
         for item in reader.keychainItems() {
             let haystacks = [item.service, item.label, item.accessGroup, item.server].compactMap { $0?.lowercased() }
             var reason: String?
-            if haystacks.contains(where: { h in ids.contains(where: { h == $0 || h.hasPrefix($0 + ".") || h.contains($0) }) }) { reason = "keychain item references the bundle ID" }
+            if haystacks.contains(where: { h in ids.contains(where: { h == $0 || h.hasPrefix($0 + ".") || h.hasSuffix("." + $0) }) }) { reason = "keychain item references the bundle ID" }
             else if let team, haystacks.contains(where: { $0.hasPrefix(team + ".") }) { reason = "keychain access group of the team" }
             else if haystacks.contains(where: { h in
                 guard h.hasSuffix(" safe storage") else { return false }
@@ -280,9 +314,11 @@ public struct RegistrationRemover: Sendable {
         switch item.payload["type"] {
         case "lsHandler":
             let domain = "com.apple.LaunchServices/com.apple.launchservices.secure" as CFString
-            guard var handlers = CFPreferencesCopyAppValue("LSHandlers" as CFString, domain) as? [[String: Any]],
-                  let index = Int(item.payload["index"] ?? ""), index < handlers.count else { return "Handler no longer present." }
-            handlers.remove(at: index)
+            guard var handlers = CFPreferencesCopyAppValue("LSHandlers" as CFString, domain) as? [[String: Any]] else { return nil }
+            guard item.payload["matchKey"] != nil else { return "Rescan before removing this handler." }   // payload from an older scan
+            let before = handlers.count
+            handlers.removeAll { LaunchServicesHandlerPayload.matches($0, item.payload) }
+            guard handlers.count != before else { return nil }   // already gone
             CFPreferencesSetAppValue("LSHandlers" as CFString, handlers as CFArray, domain)
             return CFPreferencesAppSynchronize(domain) ? nil : "Could not write Launch Services preferences."
         case "dockTile":
@@ -312,17 +348,18 @@ public struct RegistrationRemover: Sendable {
                 let (status, _, err) = await runAsRoot("tccutil", ["reset", service, bundleID])
                 return status == 0 ? nil : (err.isEmpty ? "tccutil failed (\(status))" : err)
             }
-            let output = SystemRegistrationReader.run("/usr/bin/tccutil", ["reset", service, bundleID]) ?? ""
-            return output.lowercased().contains("failed") ? output : nil
+            let result = SystemRegistrationReader.runChecked("/usr/bin/tccutil", ["reset", service, bundleID])
+            return result.status == 0 ? nil : (result.stderr.isEmpty ? "tccutil failed (\(result.status))" : result.stderr)
         case "keychain":
             guard let refString = item.payload["ref"], let ref = Data(base64Encoded: refString) else { return "Keychain reference missing." }
             let status = SecItemDelete([kSecValuePersistentRef as String: ref] as CFDictionary)
             return status == errSecSuccess || status == errSecItemNotFound ? nil : (SecCopyErrorMessageString(status, nil) as String? ?? "Keychain error \(status)")
         case "launchdJob":
+            // Stops the job; the plist itself is removed with the app's files. No `disable`, which would outlive a reinstall.
             let label = item.payload["label"] ?? ""
-            let output = SystemRegistrationReader.run("/bin/launchctl", ["bootout", "gui/\(getuid())/\(label)"]) ?? ""
-            _ = SystemRegistrationReader.run("/bin/launchctl", ["remove", label])
-            return output.contains("Could not") ? output : nil
+            let result = SystemRegistrationReader.runChecked("/bin/launchctl", ["bootout", "gui/\(getuid())/\(label)"])
+            // 3 = no such process, 113 = not loaded: already stopped.
+            return [0, 3, 113].contains(result.status) ? nil : (result.stderr.isEmpty ? "launchctl bootout failed (\(result.status))" : result.stderr)
         case "purge":
             do {
                 let report = try PurgeableReclaimer.reclaim(mount: item.payload["mount"] ?? "/")
@@ -333,28 +370,32 @@ public struct RegistrationRemover: Sendable {
             }
         case "snapshot":
             guard let runAsRoot else { return "Administrator privileges are required to delete snapshots." }
-            let (status, _, err) = await runAsRoot("tmutil", ["deletelocalsnapshots", "-d", item.payload["mount"] ?? "/", item.payload["date"] ?? ""])
+            let (status, _, err) = await runAsRoot("tmutil", ["deletelocalsnapshots", item.payload["date"] ?? ""])
             return status == 0 ? nil : (err.isEmpty ? "tmutil failed (\(status))" : err)
         case "spotlightIndex":
-            guard let runAsRoot else { return "Administrator privileges are required to erase the Spotlight index." }
-            let (status, _, err) = await runAsRoot("mdutil", ["-i", "off", "-X", item.payload["mount"] ?? ""])
+            guard let runAsRoot else { return "Administrator privileges are required to rebuild the Spotlight index." }
+            // Erase and rebuild: indexing stays on, so search on that disk keeps working once it finishes.
+            let (status, _, err) = await runAsRoot("mdutil", ["-E", item.payload["mount"] ?? ""])
             return status == 0 ? nil : (err.isEmpty ? "mdutil failed (\(status))" : err)
         case "pkgReceipt":
             guard let runAsRoot else { return "Administrator privileges are required to forget a package receipt." }
             let (status, _, err) = await runAsRoot("pkgutil", ["--forget", item.payload["identifier"] ?? ""])
             return status == 0 ? nil : (err.isEmpty ? "pkgutil failed (\(status))" : err)
         case "pluginkit":
-            return "Registration disappears on its own once the bundle is gone; run `pluginkit -r` for the path if it persists."
+            guard let path = item.payload["path"], !path.isEmpty else { return nil }
+            let result = SystemRegistrationReader.runChecked("/usr/bin/pluginkit", ["-r", path])
+            return result.status == 0 ? nil : (result.stderr.isEmpty ? "pluginkit could not unregister it (\(result.status))" : result.stderr)
         case "finderEmptyTrash":
-            let output = SystemRegistrationReader.run("/usr/bin/osascript", ["-e", "tell application \"Finder\" to empty trash"]) ?? ""
-            return output.lowercased().contains("error") ? output : nil
+            let result = SystemRegistrationReader.runChecked("/usr/bin/osascript", ["-e", "tell application \"Finder\" to empty trash"])
+            return result.status == 0 ? nil : (result.stderr.isEmpty ? "Finder could not empty the Trash (\(result.status))." : result.stderr)
         case "fseventsd":
             let dir = URL(filePath: item.payload["mount"] ?? "").appending(path: ".fseventsd")
             do {
-                for child in (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? [] where child.lastPathComponent != "no_log" {
+                // Only the event log is deleted; macOS starts a new one. (Writing `no_log` would switch logging off for good.)
+                for child in (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? []
+                    where !["no_log", "fseventsd-uuid"].contains(child.lastPathComponent) {
                     try FileManager.default.removeItem(at: child)
                 }
-                try Data().write(to: dir.appending(path: "no_log"))
                 return nil
             } catch { return error.localizedDescription }
         case "firewall":

@@ -10,6 +10,8 @@ final class StartupModel {
     var searchText = ""
     var busy: Set<String> = []
     var errors: [String: String] = [:]
+    /// A system daemon switch waiting for confirmation.
+    var pendingToggle: (item: StartupItem, enabled: Bool)?
     let scanner = StartupScanner()
     var appProvider: (@MainActor () async -> [InstalledApp])?
 
@@ -29,9 +31,15 @@ final class StartupModel {
     var enabledCount: Int { items.filter(\.isEnabled).count }
     var selected: StartupItem? { items.first { $0.id == selectedID } }
 
-    func setEnabled(_ item: StartupItem, _ enabled: Bool, helper: HelperClient) async {
+    /// Asks first before changing a system daemon (VPNs, security tools and drivers run as daemons).
+    func requestToggle(_ item: StartupItem, _ enabled: Bool, appModel: AppModel) {
+        if item.kind == .systemDaemon { pendingToggle = (item, enabled) } else { Task { await setEnabled(item, enabled, appModel: appModel) } }
+    }
+
+    func setEnabled(_ item: StartupItem, _ enabled: Bool, appModel: AppModel) async {
         busy.insert(item.id)
-        let controller = StartupController(runAsRoot: helper.isAvailable ? helper.rootRunner() : nil)
+        await appModel.helper.refreshAndVerify()
+        let controller = StartupController(runAsRoot: appModel.rootRunner())
         if let error = await controller.setEnabled(item, enabled) {
             errors[item.id] = error
         } else {
@@ -81,10 +89,26 @@ struct StartupView: View {
             }
         } footer: {
             if let item = model.selected, item.canToggle {
-                Button(item.isEnabled ? "Disable" : "Enable") { Task { await model.setEnabled(item, !item.isEnabled, helper: appModel.helper) } }
+                Button(item.isEnabled ? "Disable" : "Enable") { model.requestToggle(item, !item.isEnabled, appModel: appModel) }
                     .buttonStyle(PrimaryActionButtonStyle())
                     .disabled(model.busy.contains(item.id))
+            } else if let item = model.selected, item.kind == .userLoginItem {
+                Button("Remove from Login Items") {
+                    Task { await model.setEnabled(item, false, appModel: appModel); await model.load(force: true) }
+                }
+                .buttonStyle(PrimaryActionButtonStyle())
+                .disabled(model.busy.contains(item.id))
             }
+        }
+        .alert(model.pendingToggle.map { "\($0.enabled ? "Enable" : "Disable") \($0.item.title)?" } ?? "",
+               isPresented: Binding(get: { model.pendingToggle != nil }, set: { if !$0 { model.pendingToggle = nil } })) {
+            Button(model.pendingToggle?.enabled == true ? "Enable" : "Disable") {
+                if let pending = model.pendingToggle { Task { await model.setEnabled(pending.item, pending.enabled, appModel: appModel) } }
+                model.pendingToggle = nil
+            }
+            Button("Cancel", role: .cancel) { model.pendingToggle = nil }
+        } message: {
+            Text("This is a system daemon: it runs for all users and may belong to a VPN, security tool or driver. macOS will ask for your administrator password.")
         }
         .task { model.appProvider = { await appModel.installedApps() }; await model.load(); appModel.startupEnabledCount = model.enabledCount }
         .onChange(of: model.enabledCount) { _, count in appModel.startupEnabledCount = count }
@@ -99,9 +123,11 @@ struct StartupView: View {
         let scan = ScanItem(url: plist, title: plist.lastPathComponent, subtitle: item.label, kind: .file, group: "Login Items",
                             size: Int64((try? plist.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0), tier: .normal,
                             matchedBy: ["startup item"], needsRoot: item.needsRoot)
+        let runner = appModel.rootRunner()
         removalFlow = RemovalFlow(title: "Remove startup item", apps: [], items: [scan], quit: {
-            _ = await StartupController(runAsRoot: appModel.helper.isAvailable ? appModel.helper.rootRunner() : nil).setEnabled(item, false)
-            return true
+            // Stop the job (no permanent "disabled" override, so a reinstalled app starts normally); then remove the plist.
+            if let error = await StartupController(runAsRoot: runner).stop(item) { return ["\(item.title) (\(error))"] }
+            return []
         })
     }
 }
@@ -122,11 +148,13 @@ struct StartupRow: View {
             if model.busy.contains(item.id) {
                 ProgressView().controlSize(.small)
             } else if item.canToggle {
-                Toggle("", isOn: Binding(get: { item.isEnabled }, set: { value in Task { await model.setEnabled(item, value, helper: appModel.helper) } }))
+                Toggle("", isOn: Binding(get: { item.isEnabled }, set: { value in model.requestToggle(item, value, appModel: appModel) }))
                     .toggleStyle(.switch).labelsHidden().controlSize(.small)
+                    .accessibilityLabel("\(item.title) starts at login")
             } else {
                 Image(systemName: item.isEnabled ? "checkmark.circle.fill" : "circle").foregroundStyle(item.isEnabled ? Theme.success : .secondary)
-                    .help("Managed in System Settings")
+                    .help(item.kind == .userLoginItem ? "Opens at login" : "Managed in System Settings")
+                    .accessibilityLabel(item.isEnabled ? "Enabled" : "Disabled")
             }
         }
         .padding(.vertical, 2)
@@ -158,7 +186,7 @@ struct StartupDetailView: View {
                     if let plist = item.plistURL { InfoRow("Property list", plist.path) }
                     InfoRow("State", item.isLoaded ? (item.pid.map { "Running (pid \($0))" } ?? "Loaded") : "Not loaded")
                     if let owner = item.ownerName { InfoRow("Owner", owner) }
-                    if item.needsRoot { InfoRow("Privileges", "Administrator (helper)") }
+                    if item.needsRoot { InfoRow("Privileges", "Changing it needs administrator rights") }
                 }
                 if item.managedBySystemSettings {
                     Label("Login items registered by apps are managed in System Settings → General → Login Items & Extensions.", systemImage: "info.circle")

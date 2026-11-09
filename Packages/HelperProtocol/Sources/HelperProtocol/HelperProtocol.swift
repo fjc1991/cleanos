@@ -7,42 +7,77 @@ public enum HelperConstants {
     public static let helperBundleIdentifier = "com.cleanos.helper"
     public static let appBundleIdentifier = "com.cleanos.app"
     public static let trashWatcherBundleIdentifier = "com.cleanos.trashwatcher"
-    /// Bumped whenever the XPC protocol changes so the app can detect a stale helper.
-    public static let protocolVersion = 1
-
-    /// Command-line tools the helper is allowed to run as root, by absolute path.
-    /// Anything else is refused. Keep this list short and audited.
-    public static let allowedTools: [String: String] = [
-        "tmutil": "/usr/bin/tmutil",
-        "mdutil": "/usr/bin/mdutil",
-        "purge": "/usr/sbin/purge",
-        "sfltool": "/usr/bin/sfltool",
-        "tccutil": "/usr/bin/tccutil",
-        "pkgutil": "/usr/sbin/pkgutil",
-        "kmutil": "/usr/bin/kmutil",
-        "systemextensionsctl": "/usr/bin/systemextensionsctl",
-        "socketfilterfw": "/usr/libexec/ApplicationFirewall/socketfilterfw",
-        "fileproviderctl": "/usr/bin/fileproviderctl",
-        "launchctl": "/bin/launchctl",
-        "diskutil": "/usr/sbin/diskutil",
-        "dot_clean": "/usr/sbin/dot_clean",
-    ]
+    /// Bumped whenever the XPC protocol or the request format changes so the app can detect a stale helper.
+    public static let protocolVersion = 2
 }
 
-/// XPC interface implemented by the privileged helper daemon.
+/// XPC interface implemented by the privileged helper daemon. Requests and responses are JSON-encoded
+/// `HelperRequest` / `HelperResponse` values, the same ones the one-shot administrator mode reads and writes.
 /// All replies are delivered on an arbitrary queue.
 @objc public protocol CleanOSHelperProtocol {
     /// Returns the helper's version string and protocol version.
     func version(reply: @escaping @Sendable (String, Int) -> Void)
 
-    /// Removes the given absolute paths as root. When `permanently` is false the items are moved to the
-    /// Trash of the volume they live on; when true they are deleted. The reply maps each path to an
-    /// error description, or to an empty string on success (and, for trashed items, the Trash location).
-    func remove(paths: [String], permanently: Bool, reply: @escaping @Sendable ([String: String]) -> Void)
+    /// Performs one JSON-encoded `HelperRequest` and replies with a JSON-encoded `HelperResponse`.
+    func perform(_ request: Data, reply: @escaping @Sendable (Data) -> Void)
+}
 
-    /// Runs one of the whitelisted tools (see `HelperConstants.allowedTools`) with the given arguments.
-    func run(tool: String, arguments: [String], reply: @escaping @Sendable (Int32, String, String) -> Void)
+/// One item to remove with administrator rights.
+public struct RootRemovalRequest: Codable, Sendable, Hashable {
+    public var path: String
+    public var permanently: Bool
 
-    /// Reads a root-only file (for example the system TCC database) and returns its contents.
-    func readFile(atPath path: String, reply: @escaping @Sendable (Data?, String?) -> Void)
+    public init(path: String, permanently: Bool) {
+        self.path = path
+        self.permanently = permanently
+    }
+}
+
+/// What happened to one `RootRemovalRequest`.
+public struct RootRemovalResult: Codable, Sendable, Hashable {
+    public var path: String
+    /// Where the item went when it was moved to a Trash.
+    public var trashedPath: String?
+    /// Human-readable failure, nil on success.
+    public var error: String?
+    /// POSIX errno of the failure when known (EPERM means macOS privacy protection refused even root).
+    public var errorCode: Int32?
+    /// True when CleanOS' own safety rules refused the path.
+    public var refused: Bool
+
+    public var succeeded: Bool { error == nil }
+
+    public init(path: String, trashedPath: String? = nil, error: String? = nil, errorCode: Int32? = nil, refused: Bool = false) {
+        self.path = path
+        self.trashedPath = trashedPath
+        self.error = error
+        self.errorCode = errorCode
+        self.refused = refused
+    }
+}
+
+/// Output of an allow-listed tool run as root.
+public struct ToolResult: Codable, Sendable, Hashable {
+    public var status: Int32
+    public var stdout: String
+    public var stderr: String
+
+    public init(status: Int32, stdout: String, stderr: String) {
+        self.status = status
+        self.stdout = stdout
+        self.stderr = stderr
+    }
+}
+
+/// A unit of work for the helper. `uid`/`gid` say whose Trash removed items go to; the XPC daemon replaces them
+/// with the identity of the connecting process.
+public enum HelperRequest: Codable, Sendable, Hashable {
+    case remove(items: [RootRemovalRequest], uid: UInt32, gid: UInt32)
+    case run(tool: String, arguments: [String])
+}
+
+public enum HelperResponse: Codable, Sendable, Hashable {
+    case removed([RootRemovalResult])
+    case ran(ToolResult)
+    case failed(String)
 }

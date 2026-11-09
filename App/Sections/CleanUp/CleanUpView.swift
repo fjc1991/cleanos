@@ -75,7 +75,7 @@ struct CleanUpView: View {
                     .font(.callout.monospacedDigit()).foregroundStyle(.secondary).padding(.trailing, 8)
             }
             Button(AppSection.cleanUp.actionTitle) {
-                removalFlow = RemovalFlow(title: "Clean Up", apps: [], items: model.selectedItems, quit: { true })
+                removalFlow = RemovalFlow(title: "Clean Up", apps: [], items: model.selectedItems)
             }
             .buttonStyle(PrimaryActionButtonStyle())
             .disabled(model.selectedItems.isEmpty)

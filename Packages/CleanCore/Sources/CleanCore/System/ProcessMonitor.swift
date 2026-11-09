@@ -111,44 +111,36 @@ public enum ProcessMonitor {
 
 /// One-off maintenance actions from the Speed Up section.
 public enum MaintenanceTask: Sendable, Hashable {
-    case optimizeRAM
     case reindexSpotlight(mount: String)
     case reindexMail
-    case flushDNS
 }
 
 public struct MaintenanceRunner: Sendable {
     public var runAsRoot: (@Sendable (String, [String]) async -> (Int32, String, String))?
     public init(runAsRoot: (@Sendable (String, [String]) async -> (Int32, String, String))? = nil) { self.runAsRoot = runAsRoot }
 
-    /// Returns an error description, or nil on success.
+    /// Returns an error description, or nil on success. Mail must already have quit for `.reindexMail`.
     public func run(_ task: MaintenanceTask, home: String = NSHomeDirectory()) async -> String? {
         if FileRemover.isDryRun { return nil }
         switch task {
-        case .optimizeRAM:
-            guard let runAsRoot else { return "Administrator privileges are required to purge inactive memory. Enable the helper in Settings." }
-            let (status, _, err) = await runAsRoot("purge", [])
-            return status == 0 ? nil : (err.isEmpty ? "purge failed (\(status))" : err)
         case .reindexSpotlight(let mount):
-            guard let runAsRoot else { return "Administrator privileges are required to rebuild the Spotlight index." }
+            guard let runAsRoot else { return "Needs administrator rights to rebuild the Spotlight index." }
             let (status, _, err) = await runAsRoot("mdutil", ["-E", mount])
             return status == 0 ? nil : (err.isEmpty ? "mdutil failed (\(status))" : err)
         case .reindexMail:
+            // The index files go to the Trash, so they can be put back; Mail rebuilds them on its next launch.
             let mail = URL(filePath: home).appending(path: "Library/Mail")
             guard let versions = try? FileManager.default.contentsOfDirectory(at: mail, includingPropertiesForKeys: nil) else { return "Mail data is not accessible. Grant Full Disk Access." }
-            var removed = 0
+            var moved = 0, failed: [String] = []
             for version in versions where version.lastPathComponent.hasPrefix("V") {
                 let data = version.appending(path: "MailData")
                 for file in (try? FileManager.default.contentsOfDirectory(at: data, includingPropertiesForKeys: nil)) ?? [] where file.lastPathComponent.hasPrefix("Envelope Index") {
-                    try? FileManager.default.removeItem(at: file)
-                    removed += 1
+                    let outcome = FileRemover.trash(file)
+                    if outcome.succeeded { moved += 1 } else { failed.append(outcome.error ?? file.lastPathComponent) }
                 }
             }
-            return removed > 0 ? nil : "No Mail index found to rebuild."
-        case .flushDNS:
-            guard let runAsRoot else { return "Administrator privileges are required to flush the DNS cache." }
-            _ = await runAsRoot("launchctl", ["kickstart", "-k", "system/com.apple.mDNSResponder"])
-            return nil
+            if let first = failed.first { return "Could not move the Mail index to the Trash: \(first)" }
+            return moved > 0 ? nil : "No Mail index found to rebuild."
         }
     }
 }
