@@ -71,7 +71,8 @@ DMG is ad-hoc signed and only runs on the building machine.
    Settings → About and the support nudge. The release script overrides the repository from the git remote.
 
 A Developer ID certificate needs the Apple Developer Program. Until it is configured, releases are ad-hoc
-signed: macOS blocks them with "cannot be opened" and the privileged helper may be refused.
+signed: macOS blocks them on first launch (people have to allow the app under System Settings → Privacy &
+Security → Open Anyway) and the privileged helper may be refused.
 
 ## In-app updates
 

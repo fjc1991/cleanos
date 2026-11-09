@@ -95,9 +95,11 @@ jobs:
           if [[ -z "${CODESIGN_IDENTITY:-}" ]]; then
             cat > "$RUNNER_TEMP/footer.md" <<'MD'
 
-          > **Unsigned build.** This DMG is ad-hoc signed because no Developer ID certificate is configured.
-          > macOS will refuse to open it; to try it anyway, right-click the app → Open, or run
-          > `xattr -d com.apple.quarantine /Applications/CleanOS.app`.
+          > **Unsigned preview build.** This DMG is ad-hoc signed because no Developer ID certificate is configured,
+          > so macOS blocks it on first launch. To try it anyway, open it once, then go to System Settings →
+          > Privacy & Security and click **Open Anyway**, or run
+          > `xattr -dr com.apple.quarantine /Applications/CleanOS.app`.
+          > The privileged helper (root-only clean-ups) may be refused in unsigned builds.
           MD
           else
             printf '\nSigned with Developer ID and notarized by Apple. CleanOS updates itself from this release.\n' > "$RUNNER_TEMP/footer.md"
