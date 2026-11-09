@@ -20,6 +20,8 @@ final class AppModel {
 
     let journal = RemovalJournal()
     let cleanUp = CleanUpModel()
+    /// Each section's state lives here, so scans, results and selections survive switching sections.
+    let sections = SectionModels()
     let helper = HelperClient()
     /// Sparkle updater for CleanOS itself (Check for Updates…, Settings → Updates).
     let updater = UpdaterService()
@@ -140,6 +142,19 @@ final class AppModel {
     }
 
     var bootVolume: VolumeInfo? { volumes.first(where: \.isRoot) }
+}
+
+/// Per-section models, created the first time a section is opened.
+@MainActor
+final class SectionModels {
+    lazy var applications = ApplicationsModel()
+    lazy var startup = StartupModel()
+    lazy var extensions = ExtensionsModel()
+    lazy var speedUp = SpeedUpModel()
+    lazy var manageFiles = ManageFilesModel()
+    lazy var biggestFiles = BiggestFilesModel()
+    lazy var duplicates = DuplicatesModel()
+    lazy var updates = UpdatesModel()
 }
 
 /// `UserDefaults` keys used by Settings. Kept in one place so CleanCore-facing code and views agree.

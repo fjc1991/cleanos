@@ -103,7 +103,7 @@ final class SpeedUpModel {
 
 struct SpeedUpView: View {
     @Environment(AppModel.self) private var appModel
-    @State private var model = SpeedUpModel()
+    private var model: SpeedUpModel { appModel.sections.speedUp }
 
     var body: some View {
         @Bindable var model = model

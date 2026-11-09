@@ -125,7 +125,7 @@ final class UpdatesModel {
 
 struct UpdatesView: View {
     @Environment(AppModel.self) private var appModel
-    @State private var model = UpdatesModel()
+    private var model: UpdatesModel { appModel.sections.updates }
 
     var body: some View {
         @Bindable var model = model

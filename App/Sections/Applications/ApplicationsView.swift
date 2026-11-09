@@ -4,7 +4,7 @@ import UniformTypeIdentifiers
 
 struct ApplicationsView: View {
     @Environment(AppModel.self) private var appModel
-    @State private var model = ApplicationsModel()
+    private var model: ApplicationsModel { appModel.sections.applications }
     @State private var removalFlow: RemovalFlow?
     @State private var dropTargeted = false
     @State private var askStopSearch = false

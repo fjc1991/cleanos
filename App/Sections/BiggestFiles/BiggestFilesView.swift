@@ -16,19 +16,43 @@ final class BiggestFilesModel {
         didSet { UserDefaults.standard.set(minimumMB, forKey: "biggestFilesMinimumMB") }
     }
 
-    func scan(volumes: [VolumeInfo], force: Bool = false) async {
-        guard !isScanning, items.isEmpty || force else { return }
+    private var scanTask: Task<Void, Never>?
+    private var generation = 0
+    /// The last scan was stopped, so the results are incomplete.
+    var wasStopped = false
+
+    /// Starts a scan that keeps running while you visit other sections; a forced scan replaces a running one.
+    func start(volumes: [VolumeInfo], force: Bool = false) {
+        guard force || (items.isEmpty && scanTask == nil) else { return }
+        let previous = scanTask
+        previous?.cancel()
+        generation += 1
+        let current = generation
+        scanTask = Task { [weak self] in
+            await previous?.value
+            await self?.scan(volumes: volumes, generation: current)
+        }
+    }
+
+    func stop() { scanTask?.cancel() }
+
+    private func scan(volumes: [VolumeInfo], generation current: Int) async {
         isScanning = true
+        wasStopped = false
         selection.clear()
         let enabled = Set((try? JSONDecoder().decode([String].self, from: UserDefaults.standard.data(forKey: SettingsKey.enabledVolumeIDs) ?? Data())) ?? [])
         var roots = [FileManager.default.homeDirectoryForCurrentUser]
-        roots.append(contentsOf: volumes.filter { !$0.isRoot && enabled.contains($0.id) }.map(\.url))
+        roots.append(contentsOf: volumes.filter { !$0.isRoot && !$0.isReadOnly && enabled.contains($0.id) }.map(\.url))
         var options = LargeFilesScanner.Options()
         options.minimumSize = Int64(minimumMB) * 1024 * 1024
         options.excludedPathPrefixes = [NSHomeDirectory() + "/Library", NSHomeDirectory() + "/.Trash"]
-        items = await scanner.scan(roots: roots, options: options) { [weak self] count in Task { @MainActor in self?.scannedCount = count } }
+        let found = await scanner.scan(roots: roots, options: options) { [weak self] count in Task { @MainActor in self?.scannedCount = count } }
+        guard current == generation else { return }   // replaced by a newer scan
+        wasStopped = Task.isCancelled
+        items = found
         isScanning = false
-        if selectedID == nil { selectedID = items.first?.id }
+        scanTask = nil
+        if selectedID == nil || !items.contains(where: { $0.id == selectedID }) { selectedID = items.first?.id }
     }
 
     var filtered: [ScanItem] { items.filter { searchText.isEmpty || $0.title.localizedCaseInsensitiveContains(searchText) } }
@@ -38,19 +62,24 @@ final class BiggestFilesModel {
 
 struct BiggestFilesView: View {
     @Environment(AppModel.self) private var appModel
-    @State private var model = BiggestFilesModel()
+    private var model: BiggestFilesModel { appModel.sections.biggestFiles }
     @State private var removalFlow: RemovalFlow?
     @State private var previewURL: URL?
 
     var body: some View {
         @Bindable var model = model
         SectionLayout(section: .biggestFiles) {
-            Picker("Larger than", selection: Binding(get: { model.minimumMB }, set: { model.minimumMB = $0; Task { await model.scan(volumes: appModel.volumes, force: true) } })) {
+            Picker("Larger than", selection: Binding(get: { model.minimumMB }, set: { model.minimumMB = $0; model.start(volumes: appModel.volumes, force: true) })) {
                 Text("50 MB").tag(50); Text("100 MB").tag(100); Text("250 MB").tag(250); Text("1 GB").tag(1024); Text("5 GB").tag(5120)
             }
             .pickerStyle(.menu).fixedSize()
-            if model.isScanning { HStack(spacing: 8) { ProgressView().controlSize(.small); Text("Scanned \(model.scannedCount) items…").font(.callout).foregroundStyle(.secondary) } }
-            else { Button { Task { await model.scan(volumes: appModel.volumes, force: true) } } label: { Label("Rescan", systemImage: "arrow.clockwise") } }
+            if model.isScanning {
+                HStack(spacing: 8) { ProgressView().controlSize(.small); Text("Scanned \(model.scannedCount) items…").font(.callout).foregroundStyle(.secondary) }
+                Button("Stop") { model.stop() }
+            } else {
+                if model.wasStopped { Text("Stopped: results are incomplete").font(.callout).foregroundStyle(Theme.warning) }
+                Button { model.start(volumes: appModel.volumes, force: true) } label: { Label("Rescan", systemImage: "arrow.clockwise") }
+            }
         } primary: {
             VStack(spacing: 0) {
                 TextField("Search", text: $model.searchText).textFieldStyle(.roundedBorder).padding(10)
@@ -94,11 +123,11 @@ struct BiggestFilesView: View {
             Button(AppSection.biggestFiles.actionTitle) { removalFlow = RemovalFlow(title: "Remove biggest files", apps: [], items: items) }
                 .buttonStyle(PrimaryActionButtonStyle()).disabled(items.isEmpty)
         }
-        .task { await model.scan(volumes: appModel.volumes) }
-        .onChange(of: appModel.rescanToken) { _, _ in Task { await model.scan(volumes: appModel.volumes, force: true) } }
+        .task { model.start(volumes: appModel.volumes) }
+        .onChange(of: appModel.rescanToken) { _, _ in model.start(volumes: appModel.volumes, force: true) }
         .quickLookPreview($previewURL)
         .sheet(item: $removalFlow) { flow in
-            RemovalSheet(flow: flow) { _ in Task { await model.scan(volumes: appModel.volumes, force: true) } }.environment(appModel)
+            RemovalSheet(flow: flow) { _ in model.start(volumes: appModel.volumes, force: true) }.environment(appModel)
         }
     }
 }

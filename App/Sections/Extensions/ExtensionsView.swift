@@ -57,7 +57,7 @@ final class ExtensionsModel {
 
 struct ExtensionsView: View {
     @Environment(AppModel.self) private var appModel
-    @State private var model = ExtensionsModel()
+    private var model: ExtensionsModel { appModel.sections.extensions }
     @State private var removalFlow: RemovalFlow?
 
     var body: some View {

@@ -14,16 +14,45 @@ final class DuplicatesModel {
     let selection = SelectionStore()
     let finder = DuplicateFinder()
 
-    func scan(force: Bool = false) async {
-        guard !isScanning, groups.isEmpty || force else { return }
+    private var scanTask: Task<Void, Never>?
+    private var generation = 0
+    /// The last scan was stopped, so the results are incomplete.
+    var wasStopped = false
+
+    /// Starts a scan that keeps running while you visit other sections; a forced scan replaces a running one.
+    func start(folders: [URL]? = nil, force: Bool = false) {
+        guard force || (groups.isEmpty && scanTask == nil) else { return }
+        if let folders { self.folders = folders }
+        hasScanned = true
+        let previous = scanTask
+        previous?.cancel()
+        generation += 1
+        let current = generation
+        scanTask = Task { [weak self] in
+            await previous?.value
+            await self?.scan(generation: current)
+        }
+    }
+
+    func stop() { scanTask?.cancel() }
+
+    /// Duplicates are only searched for on request: hashing reads every candidate file.
+    var hasScanned = false
+
+    private func scan(generation current: Int) async {
         isScanning = true
+        wasStopped = false
         selection.clear()
         var options = DuplicateFinder.Options()
         options.excludedPathPrefixes = [NSHomeDirectory() + "/Library", NSHomeDirectory() + "/.Trash"]
-        groups = await finder.find(roots: folders, options: options) { [weak self] message in Task { @MainActor in self?.status = message } }
+        let found = await finder.find(roots: folders, options: options) { [weak self] message in Task { @MainActor in self?.status = message } }
+        guard current == generation else { return }
+        wasStopped = Task.isCancelled
+        groups = found
         isScanning = false
+        scanTask = nil
         status = ""
-        if selectedGroupID == nil { selectedGroupID = groups.first?.id }
+        if selectedGroupID == nil || !groups.contains(where: { $0.id == selectedGroupID }) { selectedGroupID = groups.first?.id }
     }
 
     var filtered: [DuplicateGroup] { groups.filter { searchText.isEmpty || $0.files.contains { $0.title.localizedCaseInsensitiveContains(searchText) } } }
@@ -40,21 +69,24 @@ final class DuplicatesModel {
 
 struct DuplicatesView: View {
     @Environment(AppModel.self) private var appModel
-    @State private var model = DuplicatesModel()
+    private var model: DuplicatesModel { appModel.sections.duplicates }
     @State private var removalFlow: RemovalFlow?
     @State private var previewURL: URL?
 
     var body: some View {
         @Bindable var model = model
         SectionLayout(section: .duplicates) {
-            if model.isScanning { HStack(spacing: 8) { ProgressView().controlSize(.small); Text(model.status).font(.callout).foregroundStyle(.secondary) } }
-            else {
+            if model.isScanning {
+                HStack(spacing: 8) { ProgressView().controlSize(.small); Text(model.status).font(.callout).foregroundStyle(.secondary) }
+                Button("Stop") { model.stop() }
+            } else {
+                if model.wasStopped { Text("Stopped: results are incomplete").font(.callout).foregroundStyle(Theme.warning) }
                 Button("Smart Select") { model.smartSelect() }.disabled(model.groups.isEmpty)
                 Button {
                     let panel = NSOpenPanel(); panel.canChooseDirectories = true; panel.canChooseFiles = false; panel.allowsMultipleSelection = true; panel.prompt = "Scan"
-                    if panel.runModal() == .OK, !panel.urls.isEmpty { model.folders = panel.urls; Task { await model.scan(force: true) } }
+                    if panel.runModal() == .OK, !panel.urls.isEmpty { model.start(folders: panel.urls, force: true) }
                 } label: { Label("Choose Folders…", systemImage: "folder") }
-                Button { Task { await model.scan(force: true) } } label: { Label("Rescan", systemImage: "arrow.clockwise") }
+                if model.hasScanned { Button { model.start(force: true) } label: { Label("Rescan", systemImage: "arrow.clockwise") } }
             }
         } primary: {
             VStack(spacing: 0) {
@@ -106,8 +138,16 @@ struct DuplicatesView: View {
                 }
             } else if model.isScanning {
                 VStack(spacing: 10) { ProgressView(); Text(model.status).foregroundStyle(.secondary) }.frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if !model.hasScanned {
+                ContentUnavailableView {
+                    Label("Duplicates", systemImage: "doc.on.doc")
+                } description: {
+                    Text("Finds files with identical contents in your home folder (or folders you choose). It reads every candidate file, so it can take a while; files that are only in iCloud are skipped.")
+                } actions: {
+                    Button("Find Duplicates") { model.start(force: true) }.buttonStyle(PrimaryActionButtonStyle())
+                }
             } else {
-                ContentUnavailableView("Duplicates", systemImage: "doc.on.doc", description: Text("Free up space by deleting duplicate files."))
+                ContentUnavailableView("No duplicates found", systemImage: "doc.on.doc", description: Text(model.wasStopped ? "The search was stopped before it finished." : "No files with identical contents were found."))
             }
         } footer: {
             let items = model.selectedItems
@@ -115,11 +155,10 @@ struct DuplicatesView: View {
             Button(AppSection.duplicates.actionTitle) { removalFlow = RemovalFlow(title: "Remove duplicates", apps: [], items: items) }
                 .buttonStyle(PrimaryActionButtonStyle()).disabled(items.isEmpty)
         }
-        .task { await model.scan() }
-        .onChange(of: appModel.rescanToken) { _, _ in Task { await model.scan(force: true) } }
+        .onChange(of: appModel.rescanToken) { _, _ in if model.hasScanned { model.start(force: true) } }
         .quickLookPreview($previewURL)
         .sheet(item: $removalFlow) { flow in
-            RemovalSheet(flow: flow) { _ in Task { await model.scan(force: true) } }.environment(appModel)
+            RemovalSheet(flow: flow) { _ in model.start(force: true) }.environment(appModel)
         }
     }
 

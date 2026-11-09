@@ -52,7 +52,7 @@ final class StartupModel {
 
 struct StartupView: View {
     @Environment(AppModel.self) private var appModel
-    @State private var model = StartupModel()
+    private var model: StartupModel { appModel.sections.startup }
     @State private var removalFlow: RemovalFlow?
 
     var body: some View {
