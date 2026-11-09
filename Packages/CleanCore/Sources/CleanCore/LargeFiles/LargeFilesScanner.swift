@@ -12,8 +12,9 @@ public actor LargeFilesScanner {
         public init() {}
     }
 
+    /// Cancelling the calling task stops the walk; what was found until then is returned.
     public func scan(roots: [URL], options: Options = Options(), progress: (@Sendable (Int) -> Void)? = nil) async -> [ScanItem] {
-        let found = await Task.detached(priority: .utility) { Self.walk(roots: roots, options: options, progress: progress) }.value
+        let found = await StructuredWork.run { Self.walk(roots: roots, options: options, progress: progress) }
         return Array(found.sorted { $0.size > $1.size }.prefix(options.limit))
     }
 
@@ -35,7 +36,7 @@ public actor LargeFilesScanner {
                 scanned += 1
                 if scanned % 5000 == 0 { progress?(scanned) }
                 if values.isPackage == true {
-                    let size = DirectorySizer.size(of: url)
+                    let size = DirectorySizer.size(of: url, isCancelled: { Task.isCancelled })
                     if size.bytes >= options.minimumSize { items.append(item(url, bytes: size.bytes, values: values, kind: .bundle)) }
                     continue
                 }

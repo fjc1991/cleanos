@@ -34,34 +34,51 @@ public actor FileCategoriesScanner {
 
     public static var categoryInfos: [(id: String, title: String, image: String)] { definitions.map { ($0.id, $0.title, $0.image) } }
 
+    /// Cancelling the calling task stops the walk; the totals gathered until then are returned.
     public func scan(home: URL = FileManager.default.homeDirectoryForCurrentUser, volumes: [VolumeInfo] = [], itemLimit: Int = 300,
                      includeSystem: Bool = true) async -> FileCategoriesResult {
         let start = Date()
-        var result = await Task.detached(priority: .utility) { Self.walk(home: home, volumes: volumes, itemLimit: itemLimit, includeSystem: includeSystem) }.value
+        var result = await StructuredWork.run { Self.walk(home: home, volumes: volumes, itemLimit: itemLimit, includeSystem: includeSystem) }
         result.duration = Date().timeIntervalSince(start)
         return result
     }
+
+    /// Folders the "System" total walks, and what it leaves out: `/System/Volumes` holds the mount points of the data volume
+    /// (the whole of the user's data again) and of the other volumes of the startup disk.
+    static let systemRoots = ["/System", "/Library", "/private/var", "/usr"]
+    static let systemExclusions: Set<String> = ["/System/Volumes"]
 
     nonisolated static func walk(home: URL, volumes: [VolumeInfo], itemLimit: Int, includeSystem: Bool) -> FileCategoriesResult {
         let keys: Set<URLResourceKey> = [.isRegularFileKey, .isPackageKey, .isDirectoryKey, .totalFileAllocatedSizeKey, .fileSizeKey, .contentTypeKey, .isSymbolicLinkKey, .contentModificationDateKey]
         var totals = definitions.map { FileCategoryTotal(id: $0.id, title: $0.title, systemImage: $0.image, bytes: 0, count: 0, items: []) }
         var buckets: [[ScanItem]] = Array(repeating: [], count: definitions.count)
         var folderBytes: [String: Int64] = [:]
+        var folderIsDirectory: [String: Bool] = [:]
         let fm = FileManager.default
         var roots = [home]
-        roots.append(contentsOf: volumes.filter { !$0.isRoot }.map(\.url))
+        roots.append(contentsOf: volumes.filter { !$0.isRoot && !$0.isReadOnly }.map(\.url))
         for root in roots {
+            var rootStat = stat()
+            guard lstat(root.path, &rootStat) == 0 else { continue }
             guard let enumerator = fm.enumerator(at: root, includingPropertiesForKeys: Array(keys), options: [.skipsPackageDescendants, .producesRelativePathURLs], errorHandler: { _, _ in true }) else { continue }
             for case let url as URL in enumerator {
                 if Task.isCancelled { break }
                 guard let values = try? url.resourceValues(forKeys: keys), values.isSymbolicLink != true else { continue }
                 let bytes: Int64
                 let isPackage = values.isPackage == true
+                if root == home, enumerator.level == 1 { folderIsDirectory[url.relativePath] = values.isDirectory == true }
                 if isPackage {
-                    bytes = DirectorySizer.size(of: url).bytes
+                    bytes = DirectorySizer.size(of: url, isCancelled: { Task.isCancelled }).bytes
                 } else if values.isRegularFile == true {
                     bytes = Int64(values.totalFileAllocatedSize ?? values.fileSize ?? 0)
                 } else {
+                    // A folder: never walk into another mounted volume (a disk image or share mounted inside the tree).
+                    var st = stat()
+                    let path = url.path
+                    if values.isDirectory == true, lstat(path, &st) == 0,
+                       !DirectorySizer.mayDescend(into: path, device: st.st_dev, rootDevice: rootStat.st_dev, mountPoint: DirectorySizer.mountPoint(of: path), excluded: []) {
+                        enumerator.skipDescendants()
+                    }
                     continue
                 }
                 if root == home, let top = url.relativePath.split(separator: "/").first {
@@ -82,14 +99,17 @@ public actor FileCategoriesScanner {
         for index in totals.indices {
             totals[index].items = Array(buckets[index].sorted { $0.size > $1.size }.prefix(itemLimit))
         }
+        // Display only: the rows show where the space goes (hidden folders included, so the total is right), but whole
+        // top-level folders such as ~/Documents, ~/Library or ~/.ssh are never offered for removal.
         let folders = folderBytes.map { name, bytes in
-            ScanItem(url: home.appending(path: name), title: name, subtitle: "~", kind: .directory, group: "Home folder", size: bytes, tier: .caution, matchedBy: ["home folder"])
+            ScanItem(url: home.appending(path: name), title: name, subtitle: "~", kind: folderIsDirectory[name] == false ? .file : .directory,
+                     group: "Home folder", size: bytes, tier: .protected, matchedBy: ["home folder"])
         }
         .sorted { $0.size > $1.size }
         var systemBytes: Int64 = 0
         if includeSystem {
-            for path in ["/System", "/Library", "/private/var", "/usr"] {
-                systemBytes += DirectorySizer.size(of: URL(filePath: path), isCancelled: { Task.isCancelled }).bytes
+            for path in systemRoots {
+                systemBytes += DirectorySizer.size(of: URL(filePath: path), excluding: systemExclusions, isCancelled: { Task.isCancelled }).bytes
             }
         }
         return FileCategoriesResult(categories: totals, homeFolders: folders, systemBytes: systemBytes, duration: 0)

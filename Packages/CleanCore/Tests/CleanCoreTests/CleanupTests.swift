@@ -43,10 +43,11 @@ import Testing
 
         let installers = await engine.scan(categoryID: "installers", context: context)!
         #expect(Set(installers.items.map(\.title)) == ["Installer.dmg", "Tool.pkg"])
-        #expect(installers.items.allSatisfy { $0.tier == .normal })
+        #expect(installers.items.allSatisfy { $0.tier == .caution })
 
         let screenshots = await engine.scan(categoryID: "screenshots", context: context)!
         #expect(screenshots.items.map(\.title) == ["Screenshot 2026-10-13 at 09.00.00.png"])
+        #expect(screenshots.items.allSatisfy { $0.tier == .caution })
 
         let downloads = await engine.scan(categoryID: "downloads", context: context)!
         #expect(downloads.items.count == 2 && downloads.items.allSatisfy { $0.tier == .caution })
@@ -108,6 +109,9 @@ import Testing
             #expect(report.purgeableBefore == report.purgeableAfter)
         } catch PurgeableReclaimer.ReclaimError.nothingToReclaim {
             // A volume without purgeable space is a valid outcome.
+        } catch PurgeableReclaimer.ReclaimError.wouldWriteTooMuch(let bytes) {
+            // So is a disk with far more free space than purgeable space: the reclaim refuses to fill it.
+            #expect(bytes > 0)
         }
     }
 
@@ -120,7 +124,7 @@ import Testing
         let action = result.items.first?.children.first { $0.payload["type"] == "purge" }
         #expect(action != nil)
         #expect(action?.size == 3_000_000_000)
-        #expect(action?.tier == .normal && action?.needsRoot == false)
+        #expect(action?.tier == .caution && action?.needsRoot == false)   // listed, never pre-selected
         let plan = RemovalPlan(selected: result.items, permanently: false)
         #expect(plan.registrations.contains { $0.payload["type"] == "purge" })
     }

@@ -30,8 +30,10 @@ public actor SizeCache {
         return result
     }
 
+    /// The cached size if it is younger than `maxAge`, like `size(of:)` would return without measuring.
     public func cached(_ url: URL) -> SizeResult? {
-        entries[url.standardizedFileURL.path]?.result
+        guard let entry = entries[url.standardizedFileURL.path], Date().timeIntervalSince(entry.computedAt) < maxAge else { return nil }
+        return entry.result
     }
 
     public func invalidate(_ url: URL) {

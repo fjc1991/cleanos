@@ -20,9 +20,28 @@ public actor DuplicateFinder {
         public init() {}
     }
 
+    /// What the last `find` left out.
+    public struct Stats: Sendable, Equatable {
+        /// Files at least `minimumSize` that were looked at.
+        public var filesConsidered = 0
+        /// iCloud / File Provider placeholders that are not downloaded: reading them would download them, so they are skipped.
+        public var skippedNotDownloaded = 0
+        /// Extra paths of hard-linked files: they share one copy on disk, so they are not duplicates.
+        public var hardLinksCollapsed = 0
+        public init() {}
+    }
+
+    /// Counts of the most recent `find` (read after it returns).
+    public private(set) var lastStats = Stats()
+
+    /// Cancelling the calling task stops the file walk and the hashing; a cancelled search returns no groups.
     public func find(roots: [URL], options: Options = Options(), progress: (@Sendable (String) -> Void)? = nil) async -> [DuplicateGroup] {
         progress?("Listing files…")
-        let candidates = await Task.detached(priority: .utility) { Self.collect(roots: roots, options: options) }.value
+        lastStats = Stats()
+        let collected = await StructuredWork.run { Self.collect(roots: roots, options: options) }
+        lastStats = collected.stats
+        if Task.isCancelled { return [] }
+        let candidates = collected.candidates
         let bySize = Dictionary(grouping: candidates, by: \.size).filter { $0.value.count > 1 }
         progress?("Comparing \(bySize.values.reduce(0) { $0 + $1.count }) files of equal size…")
 
@@ -31,7 +50,7 @@ public actor DuplicateFinder {
             var pending = bySize.values.flatMap { $0 }.makeIterator()
             var running = 0
             func addNext() -> Bool {
-                guard let candidate = pending.next() else { return false }
+                guard !Task.isCancelled, let candidate = pending.next() else { return false }
                 group.addTask { Self.hash(candidate.url, partial: true).map { ("\(candidate.size):\($0)", candidate) } }
                 return true
             }
@@ -41,6 +60,7 @@ public actor DuplicateFinder {
                 if !addNext() { running -= 1 }
             }
         }
+        if Task.isCancelled { return [] }
         let partialGroups = byPartial.values.filter { $0.count > 1 }
         progress?("Verifying \(partialGroups.reduce(0) { $0 + $1.count }) candidates…")
 
@@ -49,7 +69,7 @@ public actor DuplicateFinder {
             var pending = partialGroups.flatMap { $0 }.makeIterator()
             var running = 0
             func addNext() -> Bool {
-                guard let candidate = pending.next() else { return false }
+                guard !Task.isCancelled, let candidate = pending.next() else { return false }
                 group.addTask { Self.hash(candidate.url, partial: false).map { ("\(candidate.size):\($0)", candidate) } }
                 return true
             }
@@ -59,6 +79,7 @@ public actor DuplicateFinder {
                 if !addNext() { running -= 1 }
             }
         }
+        if Task.isCancelled { return [] }
         return byFull.compactMap { key, candidates -> DuplicateGroup? in
             guard candidates.count > 1 else { return nil }
             let files = candidates.sorted { ($0.created ?? .distantFuture, $0.url.pathComponents.count) < ($1.created ?? .distantFuture, $1.url.pathComponents.count) }
@@ -76,21 +97,42 @@ public actor DuplicateFinder {
 
     struct Candidate: Sendable { let url: URL; let size: Int64; let created: Date?; let modified: Date? }
 
-    nonisolated static func collect(roots: [URL], options: Options) -> [Candidate] {
+    /// `SF_DATALESS`: the file's contents live in iCloud or a File Provider and reading it downloads them.
+    static let datalessFlag: UInt32 = 0x4000_0000
+
+    /// True for a placeholder whose contents are not on this Mac (reading it would start a download).
+    static func isPlaceholder(flags: UInt32, downloadingStatus: URLUbiquitousItemDownloadingStatus?) -> Bool {
+        if flags & datalessFlag != 0 { return true }
+        if let downloadingStatus, downloadingStatus != .current { return true }
+        return false
+    }
+
+    /// Regular, non-empty, downloaded files of at least `minimumSize`, one path per file on disk (hard links collapse).
+    nonisolated static func collect(roots: [URL], options: Options) -> (candidates: [Candidate], stats: Stats) {
         let keys: Set<URLResourceKey> = [.isRegularFileKey, .fileSizeKey, .isSymbolicLinkKey, .creationDateKey, .contentModificationDateKey, .isPackageKey]
         var out: [Candidate] = []
+        var stats = Stats()
+        var seen: Set<FileID> = []
         for root in roots {
             guard let enumerator = FileManager.default.enumerator(at: root, includingPropertiesForKeys: Array(keys), options: [.skipsHiddenFiles, .skipsPackageDescendants], errorHandler: { _, _ in true }) else { continue }
             for case let url as URL in enumerator {
-                if Task.isCancelled { return out }
+                if Task.isCancelled { return (out, stats) }
                 if options.excludedPathPrefixes.contains(where: { url.path.hasPrefix($0) }) { enumerator.skipDescendants(); continue }
                 guard let values = try? url.resourceValues(forKeys: keys), values.isRegularFile == true, values.isSymbolicLink != true else { continue }
                 let size = Int64(values.fileSize ?? 0)
-                guard size >= options.minimumSize else { continue }
+                // Empty files all have the same contents without being copies of anything.
+                guard size > 0, size >= options.minimumSize else { continue }
+                var st = stat()
+                guard lstat(url.path, &st) == 0 else { continue }
+                stats.filesConsidered += 1
+                let status = (st.st_flags & datalessFlag) != 0 ? nil
+                    : (try? url.resourceValues(forKeys: [.ubiquitousItemDownloadingStatusKey]))?.ubiquitousItemDownloadingStatus
+                if isPlaceholder(flags: st.st_flags, downloadingStatus: status) { stats.skippedNotDownloaded += 1; continue }
+                if !seen.insert(FileID(device: st.st_dev, inode: st.st_ino)).inserted { stats.hardLinksCollapsed += 1; continue }
                 out.append(Candidate(url: url, size: size, created: values.creationDate, modified: values.contentModificationDate))
             }
         }
-        return out
+        return (out, stats)
     }
 
     /// SHA-256 of the first and last 64 KB (partial) or of the whole file.

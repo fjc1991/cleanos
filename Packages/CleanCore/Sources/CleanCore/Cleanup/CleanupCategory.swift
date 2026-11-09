@@ -36,8 +36,10 @@ public struct CleanupContext: Sendable {
         self.includeRootVolume = includeRootVolume
     }
 
-    /// The boot volume (unless scoped out) plus every external volume in scope.
-    public var scopedVolumes: [VolumeInfo] { volumes.filter { ($0.isRoot && includeRootVolume) || (!$0.isRoot && enabledVolumeIDs.contains($0.id)) } }
+    /// The boot volume (unless scoped out) plus every external volume in scope. Read-only volumes are never in scope.
+    public var scopedVolumes: [VolumeInfo] {
+        volumes.filter { !$0.isReadOnly && (($0.isRoot && includeRootVolume) || (!$0.isRoot && enabledVolumeIDs.contains($0.id))) }
+    }
     public var homeURL: URL { URL(filePath: home) }
 }
 
@@ -58,13 +60,58 @@ public protocol CleanupScanner: Sendable {
     func scan(_ context: CleanupContext) async -> [ScanItem]
 }
 
+/// Folders a scan was not allowed to list, collected while one category is scanned.
+final class UnreadableFolders: @unchecked Sendable {
+    private let lock = NSLock()
+    private var entries: [(path: String, errno: Int32)] = []
+
+    func record(_ url: URL, errno code: Int32) {
+        let path = url.standardizedFileURL.path
+        lock.withLock { if !entries.contains(where: { $0.path == path }) { entries.append((path, code)) } }
+    }
+
+    var all: [(path: String, errno: Int32)] { lock.withLock { entries } }
+}
+
 /// Helpers shared by the scanners.
 enum CleanupSupport {
     static let fileKeys: Set<URLResourceKey> = [.isDirectoryKey, .isSymbolicLinkKey, .contentModificationDateKey, .fileSizeKey, .totalFileAllocatedSizeKey]
 
+    /// Set by `CleanupEngine` for the duration of one category scan; listings refused with EPERM/EACCES land here.
+    @TaskLocal static var unreadable: UnreadableFolders?
+
+    /// Contents of a folder; empty when it does not exist or cannot be read. A refused listing is recorded so the
+    /// category can say so instead of looking clean.
     static func children(of url: URL, skippingHidden: Bool = true) -> [URL] {
-        (try? FileManager.default.contentsOfDirectory(at: url, includingPropertiesForKeys: Array(fileKeys),
-                                                      options: skippingHidden ? [.skipsHiddenFiles] : [])) ?? []
+        do {
+            return try FileManager.default.contentsOfDirectory(at: url, includingPropertiesForKeys: Array(fileKeys),
+                                                               options: skippingHidden ? [.skipsHiddenFiles] : [])
+        } catch {
+            recordIfDenied(url, error: error)
+            return []
+        }
+    }
+
+    static func recordIfDenied(_ url: URL, error: Error) {
+        guard let code = DirectorySizer.permissionDenial(in: error) else { return }
+        unreadable?.record(url, errno: code)
+    }
+
+    /// A display-only row naming the folders a category could not read, so an unreadable folder does not look clean.
+    static func unreadableNote(_ entries: [(path: String, errno: Int32)], category: CleanupCategoryInfo, home: String) -> ScanItem? {
+        guard !entries.isEmpty else { return nil }
+        func display(_ path: String) -> String { path == home || path.hasPrefix(home + "/") ? "~" + path.dropFirst(home.count) : path }
+        func list(_ paths: [String]) -> String { paths.count <= 2 ? paths.joined(separator: " and ") : "\(paths[0]) and \(paths.count - 1) more folders" }
+        // EPERM comes from privacy protection (fixed by Full Disk Access), EACCES from plain file permissions (it is not).
+        let privacy = entries.filter { $0.errno == EPERM }.map { display($0.path) }
+        let posix = entries.filter { $0.errno != EPERM }.map { display($0.path) }
+        var parts: [String] = []
+        if !privacy.isEmpty { parts.append("Full Disk Access is required to read \(list(privacy))") }
+        if !posix.isEmpty { parts.append((privacy.isEmpty ? "Y" : "y") + "our account is not allowed to read \(list(posix))") }
+        let count = entries.count
+        return ScanItem(id: "\(category.id):unreadable", title: count == 1 ? "1 folder could not be read" : "\(count) folders could not be read",
+                        subtitle: parts.joined(separator: "; "), kind: .registration, group: category.title, size: 0, tier: .protected,
+                        matchedBy: ["folder listing refused"], payload: ["type": "note", "paths": entries.map(\.path).joined(separator: "\n")])
     }
 
     static func isDirectory(_ url: URL) -> Bool {
