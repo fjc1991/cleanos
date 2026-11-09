@@ -22,8 +22,6 @@ jobs:
         run: swift test --package-path Packages/CleanCore
       - name: Test UpdateSources
         run: swift test --package-path Packages/UpdateSources
-      - name: Build app (ad hoc signed)
-        run: |
-          set -o pipefail
-          xcodebuild -project CleanOS.xcodeproj -scheme CleanOS -configuration Debug \
-            -derivedDataPath build/DerivedData CODE_SIGN_IDENTITY=- DEVELOPMENT_TEAM= build | tail -40
+      # Rehearses the release path on every push: Release build, signing, the startup check and the DMG.
+      - name: Package the app (release dry run)
+        run: SKIP_TESTS=1 SKIP_APPCAST=1 Scripts/release.sh

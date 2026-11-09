@@ -1,7 +1,6 @@
 import SwiftUI
 import CleanCore
 
-@main
 struct CleanOSApp: App {
     @State private var model = AppModel()
     @AppStorage(SettingsKey.appearance) private var appearance = AppearanceMode.auto.rawValue

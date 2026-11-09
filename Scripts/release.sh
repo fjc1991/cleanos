@@ -10,13 +10,22 @@
 #   KOFI_NAME                 Ko-fi page name (ko-fi.com/<name>)          default: CLEANOS_KOFI_NAME in project.yml
 #   SPARKLE_PRIVATE_KEY_FILE  EdDSA private key exported with `generate_keys -x`; default: the key in the login keychain
 #   SKIP_TESTS=1              skip the package tests
-#   DEVELOPER_DIR             Xcode to use                                default: /Applications/Xcode.app/Contents/Developer
+#   SKIP_APPCAST=1            dry run: build and package the DMG only, without the update key or the appcast
+#   DEVELOPER_DIR             Xcode to use                                default: the selected Xcode, or
+#                             /Applications/Xcode.app when only the Command Line Tools are selected
 #
 # Output: build/CleanOS-<version>.dmg and build/appcast.xml. Attach BOTH to the GitHub release tagged v<version>;
 # installed copies read https://github.com/<repo>/releases/latest/download/appcast.xml.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-export DEVELOPER_DIR="${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}"
+# Respect the Xcode chosen with xcode-select (CI picks one that way); fall back to /Applications/Xcode.app only
+# when the Command Line Tools are selected, because they cannot build the app.
+if [[ -z "${DEVELOPER_DIR:-}" ]]; then
+  SELECTED="$(xcode-select -p 2>/dev/null || true)"
+  if [[ "$SELECTED" != *.app/Contents/Developer && -d /Applications/Xcode.app/Contents/Developer ]]; then
+    export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
+  fi
+fi
 IDENTITY="${CODESIGN_IDENTITY:--}"
 TEAM="${TEAM_ID:-}"
 VERSION="$(sed -n 's/.*MARKETING_VERSION: "\(.*\)"/\1/p' project.yml | head -1)"
@@ -51,17 +60,28 @@ if [[ "${SKIP_TESTS:-0}" != "1" ]]; then
 fi
 
 echo "▸ Building Release"
-xcodebuild -project CleanOS.xcodeproj -scheme CleanOS -configuration Release -derivedDataPath "$OUT" \
+# Judge the build by xcodebuild's own exit status: an app left over from an earlier build must never be packaged.
+BUILD_LOG="build/release-build.log"
+mkdir -p build
+if ! xcodebuild -project CleanOS.xcodeproj -scheme CleanOS -configuration Release -derivedDataPath "$OUT" \
   CODE_SIGN_IDENTITY="$IDENTITY" DEVELOPMENT_TEAM="$TEAM" \
-  CLEANOS_GITHUB_REPO="$GITHUB_REPO" CLEANOS_KOFI_NAME="$KOFI" build | grep -E "error:|BUILD" || true
-[ -d "$APP" ] || { echo "build failed"; exit 1; }
+  CLEANOS_GITHUB_REPO="$GITHUB_REPO" CLEANOS_KOFI_NAME="$KOFI" build > "$BUILD_LOG" 2>&1; then
+  grep -E "error:|BUILD FAILED" "$BUILD_LOG" || tail -40 "$BUILD_LOG"
+  echo "✗ build failed (full log: $BUILD_LOG)" >&2
+  exit 1
+fi
+[ -d "$APP" ] || { echo "✗ the build reported success but $APP is missing" >&2; exit 1; }
 
 PLIST="$APP/Contents/Info.plist"
 FEED="$(/usr/libexec/PlistBuddy -c 'Print :SUFeedURL' "$PLIST")"
 PUBKEY="$(/usr/libexec/PlistBuddy -c 'Print :SUPublicEDKey' "$PLIST")"
 if [[ "$PUBKEY" == *PLACEHOLDER* || -z "$PUBKEY" ]]; then
-  echo "✗ SUPublicEDKey is not set in project.yml. Run Scripts/sparkle-keys.sh once and commit the public key." >&2
-  exit 1
+  if [[ "${SKIP_APPCAST:-0}" == "1" ]]; then
+    echo "⚠ SUPublicEDKey is still the placeholder: this dry-run build cannot update itself. Do not publish it."
+  else
+    echo "✗ SUPublicEDKey is not set in project.yml. Run Scripts/sparkle-keys.sh once and commit the public key." >&2
+    exit 1
+  fi
 fi
 echo "▸ Update feed: $FEED"
 
@@ -81,14 +101,33 @@ if [[ "$IDENTITY" != "-" ]]; then
   codesign --verify --deep --strict --verbose=2 "$APP"
 else
   echo "⚠ Ad-hoc signed: Gatekeeper will block this DMG on other Macs and the privileged helper may be refused. Set CODESIGN_IDENTITY for a real release."
+  # An ad-hoc signature carries no team, so the hardened runtime's library validation refuses to load the
+  # embedded Sparkle framework and the app dies at launch. Keep the hardened runtime and waive only that check
+  # (signing again here also drops the get-task-allow entitlement Xcode injects into ad-hoc builds).
+  ADHOC_ENTITLEMENTS="$(mktemp -d)/CleanOS.entitlements"
+  cp App/CleanOS.entitlements "$ADHOC_ENTITLEMENTS"
+  /usr/libexec/PlistBuddy -c "Add :com.apple.security.cs.disable-library-validation bool true" "$ADHOC_ENTITLEMENTS"
+  codesign --force --options runtime --sign - --entitlements "$ADHOC_ENTITLEMENTS" "$APP"
+  rm -rf "$(dirname "$ADHOC_ENTITLEMENTS")"
+  codesign --verify --deep --strict "$APP"
 fi
+
+# dyld loads the embedded frameworks under the final signature before main() runs, so this catches a build
+# that cannot start (wrong signature, missing framework) before it is packaged.
+echo "▸ Checking that the signed app starts"
+"$APP/Contents/MacOS/CleanOS" --smoke-test || { echo "✗ the signed app cannot start; see the message above" >&2; exit 1; }
 
 echo "▸ Packaging $DMG"
 STAGE="$(mktemp -d)"
 cp -R "$APP" "$STAGE/"
 ln -s /Applications "$STAGE/Applications"
 rm -f "$DMG"
-hdiutil create -volname "CleanOS" -srcfolder "$STAGE" -ov -format UDZO "$DMG" >/dev/null
+# hdiutil sometimes reports "Resource busy" on CI machines while Spotlight or XProtect still holds the folder.
+for ATTEMPT in 1 2 3; do
+  hdiutil create -volname "CleanOS" -srcfolder "$STAGE" -ov -format UDZO "$DMG" >/dev/null && break
+  [[ "$ATTEMPT" == 3 ]] && { echo "✗ hdiutil could not create the DMG"; exit 1; }
+  echo "  hdiutil failed (attempt $ATTEMPT), retrying"; sleep 5
+done
 rm -rf "$STAGE"
 
 if [[ -n "${NOTARY_PROFILE:-}" && "$IDENTITY" != "-" ]]; then
@@ -96,6 +135,11 @@ if [[ -n "${NOTARY_PROFILE:-}" && "$IDENTITY" != "-" ]]; then
   xcrun notarytool submit "$DMG" --keychain-profile "$NOTARY_PROFILE" --wait
   xcrun stapler staple "$DMG"
   xcrun stapler staple "$APP"
+fi
+
+if [[ "${SKIP_APPCAST:-0}" == "1" ]]; then
+  echo "✓ $DMG (dry run: no appcast written)"
+  exit 0
 fi
 
 echo "▸ Writing Sparkle appcast"

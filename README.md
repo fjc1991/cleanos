@@ -56,17 +56,20 @@ release with `CleanOS-<version>.dmg` and `appcast.xml` attached. Installed copie
 
 The same can be done locally with `Scripts/release.sh` (environment: `CODESIGN_IDENTITY`, `TEAM_ID`,
 `NOTARY_PROFILE`, optional `GITHUB_REPO`, `KOFI_NAME`, `SPARKLE_PRIVATE_KEY_FILE`). Without an identity the
-DMG is ad-hoc signed and only runs on the building machine.
+DMG is ad-hoc signed, which other Macs block until the app is allowed by hand (see below).
+`SKIP_APPCAST=1 Scripts/release.sh` is a dry run that stops after packaging the DMG.
 
 ### One-time setup
 
-1. **Sparkle key pair** – `Scripts/sparkle-keys.sh` creates an EdDSA key in your login keychain and writes
-   the public half into `project.yml` (`SUPublicEDKey`). Back the private key up; every update must be signed
-   with it. `Scripts/sparkle-keys.sh export sparkle_private.key` exports it for CI.
-2. **GitHub secrets** (Settings → Secrets and variables → Actions): `MACOS_CERTIFICATE_P12` (base64 of the
-   "Developer ID Application" .p12), `MACOS_CERTIFICATE_PASSWORD`, `APPLE_TEAM_ID`, `APPLE_ID`,
-   `APPLE_APP_PASSWORD` (app-specific password), `SPARKLE_PRIVATE_KEY` (contents of the exported key file).
-   Repository variable `KOFI_NAME` = your ko-fi.com page name.
+1. **Sparkle key pair** – `Scripts/sparkle-keys.sh github` creates an EdDSA key in your login keychain,
+   writes the public half into `project.yml` (`SUPublicEDKey`, commit it) and stores the private half as the
+   `SPARKLE_PRIVATE_KEY` secret of the GitHub repository. Every update must be signed with this key and
+   GitHub never shows a secret again, so keep a backup outside the repository:
+   `Scripts/sparkle-keys.sh export <file>`.
+2. **GitHub secrets for signing** (Settings → Secrets and variables → Actions): `MACOS_CERTIFICATE_P12`
+   (base64 of the "Developer ID Application" .p12), `MACOS_CERTIFICATE_PASSWORD`, `APPLE_TEAM_ID`, `APPLE_ID`,
+   `APPLE_APP_PASSWORD` (app-specific password). Optional repository variable `KOFI_NAME` overrides the
+   ko-fi.com page name from `project.yml`.
 3. **Links** – `CLEANOS_GITHUB_REPO` and `CLEANOS_KOFI_NAME` in `project.yml` feed the Help menu,
    Settings → About and the support nudge. The release script overrides the repository from the git remote.
 
