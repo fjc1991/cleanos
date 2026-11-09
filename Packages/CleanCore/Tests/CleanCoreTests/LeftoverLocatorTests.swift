@@ -171,10 +171,16 @@ import Testing
         defer { try? FileManager.default.removeItem(at: fixture.home) }
         let locator = LeftoverLocator(rules: .bundled, home: fixture.home.path)
         let result = await locator.locate(app: fixture.app, otherApps: [], includeExecutable: false)
-        let plan = RemovalPlan(selected: result.defaultSelection, permanently: false)
+        // The deep dive also reads real system folders (plug-ins, launch daemons), so what it finds outside the
+        // fixture depends on the host: GitHub's macOS runners ship a `com.example…` audio driver that the
+        // same-developer rule rightly matches. Keep the plan to the fixture; items without a URL (registrations) stay in.
+        let marker = fixture.home.lastPathComponent
+        let selection = result.defaultSelection.filter { item in item.url.map { $0.path.contains(marker) } ?? true }
+        #expect(!selection.isEmpty)
+        let plan = RemovalPlan(selected: selection, permanently: false)
         #expect(plan.rootItems.isEmpty)
         #expect(plan.registrations.isEmpty)                 // caution-tier shell line is not selected by default
-        #expect(plan.userItems.count == result.defaultSelection.count)
+        #expect(plan.userItems.count == selection.count)
         #expect(!result.allItems.filter { $0.tier == .caution }.isEmpty)
 
         setenv("CLEANOS_DRY_RUN", "1", 1)
