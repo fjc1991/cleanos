@@ -4,6 +4,16 @@ A native macOS cleaner that combines the feature set of MacCleaner Pro and App C
 one-pass clean-up, exhaustive app uninstalling, startup/extension management, updates, duplicates,
 biggest files and external-disk purging. Swift 6 + SwiftUI, Developer ID (not sandboxed).
 
+## Install
+
+Download `CleanOS-<version>.dmg` from the [latest release](https://github.com/fjc1991/cleanos/releases/latest),
+open it and drag CleanOS into Applications. It needs macOS 14 or later and runs on Apple silicon and Intel.
+
+Current releases are **unsigned previews** (there is no Apple Developer ID behind them yet), so macOS blocks
+the first launch: open CleanOS once, then go to System Settings → Privacy & Security and click **Open Anyway**.
+From then on it opens normally and offers new versions itself (Settings → Updates). The privileged helper for
+root-only clean-ups may be refused in unsigned builds.
+
 ## Build
 
 Xcode 16+ is required. On a machine where `xcode-select` points at the Command Line Tools, prefix
@@ -34,7 +44,7 @@ committed; run `xcodegen generate` after cloning or after editing `project.yml`.
 - `Packages/UpdateSources` – Sparkle / Homebrew / App Store update checks
 - `Packages/HelperProtocol` – XPC protocol shared by app and helper
 - `Rules/` – JSON data the scanners load at runtime
-- `Scripts/` – `release.sh` (DMG + notarization + appcast), `bump-version.sh`, `sparkle-keys.sh`, `make-icon.swift`
+- `Scripts/` – `release.sh` (DMG + notarization + appcast), `bump-version.sh`, `sparkle-keys.sh`, `verify-update-signature.swift`, `make-icon.swift`
 - `.github/workflows/` – CI build/test on every push; tagged releases build, notarize and publish
 
 Run with `CLEANOS_DRY_RUN=1` to log removal plans without touching the disk (the default scheme sets it).

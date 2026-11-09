@@ -155,6 +155,14 @@ KEY_ARGS=()
   --link "https://github.com/$GITHUB_REPO/releases/tag/v$VERSION" \
   -o "$APPCAST" "$APPCAST_DIR"
 grep -q "sparkle:edSignature" "$APPCAST" || { echo "✗ appcast has no EdDSA signature"; exit 1; }
+# Installed copies accept an update only if this signature verifies against the SUPublicEDKey they carry.
+SIGNATURE="$(sed -n 's/.*sparkle:edSignature="\([^"]*\)".*/\1/p' "$APPCAST" | head -1)"
+if ! swift Scripts/verify-update-signature.swift "$DMG" "$SIGNATURE" "$PUBKEY"; then
+  echo "✗ The update is signed with a key that does not match SUPublicEDKey in the app; installed copies would" >&2
+  echo "  refuse it. Check that the signing key is the one Scripts/sparkle-keys.sh wrote into project.yml." >&2
+  exit 1
+fi
+echo "▸ Update signature matches the key in the app"
 rm -rf "$APPCAST_DIR"
 
 echo "✓ $DMG"
