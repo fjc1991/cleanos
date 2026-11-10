@@ -50,6 +50,9 @@ public struct CleanupResult: Sendable {
     public let duration: TimeInterval
     public var totalSize: Int64 { items.reduce(0) { $0 + $1.size } }
     public var leafCount: Int { items.flatMap(\.leaves).count }
+    /// What can actually be removed: rows shown only for information (protected) do not count.
+    public var removableLeaves: [ScanItem] { items.flatMap(\.leaves).filter { $0.tier.isSelectable && $0.kind != .group } }
+    public var removableSize: Int64 { removableLeaves.reduce(0) { $0 + $1.size } }
     public init(category: CleanupCategoryInfo, items: [ScanItem], duration: TimeInterval) {
         self.category = category; self.items = items; self.duration = duration
     }

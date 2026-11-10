@@ -108,7 +108,9 @@ struct CategoryDetailView: View {
                     Text(category.title).font(.title3.weight(.semibold))
                     Spacer()
                     if let result = model.results[category.id] {
-                        Text("\(result.leafCount) items · \(result.totalSize.formattedBytes)").font(.callout.monospacedDigit()).foregroundStyle(.secondary)
+                        Text(result.removableLeaves.isEmpty ? (result.items.isEmpty ? "" : "Nothing to remove")
+                             : "\(countText(result.removableLeaves.count, "item")) · \(result.removableSize.formattedBytes)")
+                            .font(.callout.monospacedDigit()).foregroundStyle(.secondary)
                     }
                     Button { Task { await model.rescan(categoryID: category.id, volumes: appModel.volumes) } } label: { Image(systemName: "arrow.clockwise") }
                         .buttonStyle(.borderless).disabled(model.scanning.contains(category.id))
@@ -124,7 +126,7 @@ struct CategoryDetailView: View {
                 if result.items.isEmpty {
                     ContentUnavailableView("Nothing to clean", systemImage: "checkmark.circle", description: Text("No \(category.title.lowercased()) were found."))
                 } else {
-                    SelectAllHeader(items: result.items, selection: model.selection)
+                    if !result.removableLeaves.isEmpty { SelectAllHeader(items: result.items, selection: model.selection) }
                     ScanTreeView(items: result.items, selection: model.selection, expanded: $model.expanded)
                 }
             } else if model.scanning.contains(category.id) {

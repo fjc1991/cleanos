@@ -49,7 +49,8 @@ struct RemovalSheet: View {
             case .blocked(let survivors): blocked(survivors)
             case .running(let done, let total, let current):
                 CleanupProgressView(title: flow.title, done: done, total: total, current: current, recent: recent, freedSoFar: freedSoFar,
-                                    groups: Array(NSOrderedSet(array: includedItems.map(\.group))) as? [String] ?? [])
+                                    groups: Array(NSOrderedSet(array: includedItems.map(\.group))) as? [String] ?? [],
+                                    administrator: AdminAuthorizedRunner.shared.activity)
                     .overlay(alignment: .bottomTrailing) { stalledEscape }
             case .finished(let result): finished(result)
             }
@@ -214,19 +215,20 @@ struct RemovalSheet: View {
         await appModel.helper.refreshAndVerify()
         let executor = RemovalExecutor(journal: appModel.journal, rootRemover: appModel.rootRemover(),
                                        registrationRemover: RegistrationRemover(runAsRoot: appModel.rootRunner()))
-        let result = await executor.execute(plan, title: flow.title, appVersion: AppModel.appVersion) { done, total, current in
-            Task { @MainActor in
-                lastProgress = .now
-                if case .running(let previousDone, _, let previous) = phase, let previous, done > previousDone {
-                    withAnimation(.spring(duration: 0.4)) {
-                        recent.insert(previous, at: 0)
-                        if recent.count > 6 { recent.removeLast() }
-                        freedSoFar += previous.size
-                    }
-                }
-                withAnimation(.easeInOut(duration: 0.35)) { phase = .running(done: done, total: total, current: current) }
+        // The executor reports every item, hundreds a second for small caches. The window picks up the latest state
+        // ten times a second instead: one animation per item piles up into overlapping rows and a backlog of updates.
+        let relay = RemovalProgressRelay(keeping: RecentFeed.rows)
+        let pump = Task { @MainActor in
+            while !Task.isCancelled {
+                apply(relay.take())
+                try? await Task.sleep(for: .milliseconds(100))
             }
         }
+        let result = await executor.execute(plan, title: flow.title, appVersion: AppModel.appVersion) { done, total, current in
+            relay.report(done: done, total: total, current: current)
+        }
+        pump.cancel()
+        apply(relay.take())
         for failure in result.failed {
             Diagnostics.log("removal failed [\(failure.problem.rawValue)] \(failure.item.url?.path ?? failure.item.id): \(failure.error)")
         }
@@ -234,6 +236,16 @@ struct RemovalSheet: View {
         withAnimation(.spring(duration: 0.5)) { phase = .finished(result) }
         onFinished(result)
         if !NSApp.isActive { await notifyCompletion(result) }
+    }
+
+    /// Shows the progress collected since the last call. Ignored once the run is over, so nothing late can bring
+    /// the progress view back over the results.
+    private func apply(_ snapshot: RemovalProgressRelay.Snapshot) {
+        guard snapshot.changed, isRunning else { return }
+        lastProgress = .now
+        if !snapshot.finished.isEmpty { recent = Array((snapshot.finished.reversed() + recent).prefix(RecentFeed.rows)) }
+        freedSoFar = snapshot.freed
+        phase = .running(done: snapshot.done, total: snapshot.total, current: snapshot.current)
     }
 
     /// Posts a notification when the clean-up finished while another app was in front.
@@ -372,7 +384,9 @@ func countText(_ count: Int, _ singular: String, plural: String? = nil) -> Strin
 }
 
 /// Animated "cleaning in progress" view: gradient ring with a sweeping highlight, the item being removed,
-/// pulsing icons for the kinds of things in the batch and a feed of what was just removed.
+/// icons for the kinds of things in the batch and a feed of what was just removed. Rows change in place: nothing
+/// slides or fades between items, so fast runs stay readable and a frozen window (while macOS shows its password
+/// dialog) never shows two rows on top of each other.
 struct CleanupProgressView: View {
     let title: String
     let done: Int
@@ -381,12 +395,20 @@ struct CleanupProgressView: View {
     let recent: [ScanItem]
     let freedSoFar: Int64
     let groups: [String]
+    var administrator: AdminAuthorizedRunner.Activity = .idle
 
     private var fraction: Double { total > 0 ? Double(done) / Double(total) : 0 }
+    private var headline: String {
+        switch administrator {
+        case .asking: "Waiting for your password…"
+        case .working: "Removing with administrator rights…"
+        case .idle: done >= total && total > 0 ? "Finishing up…" : "Cleaning up…"
+        }
+    }
 
     var body: some View {
         VStack(spacing: 22) {
-            Text(done >= total && total > 0 ? "Finishing up…" : "Cleaning up…").font(.title3.weight(.semibold))
+            Text(headline).font(.title3.weight(.semibold))
             GroupIconRow(groups: groups, activeGroup: current?.group)
             ZStack {
                 Circle().stroke(Color.primary.opacity(0.08), lineWidth: 14)
@@ -396,15 +418,15 @@ struct CleanupProgressView: View {
                             style: StrokeStyle(lineWidth: 14, lineCap: .round))
                     .rotationEffect(.degrees(-90))
                     .shadow(color: Theme.accent.opacity(0.45), radius: 10)
-                    .animation(.easeInOut(duration: 0.4), value: fraction)
-                SweepHighlight()
+                    .animation(.easeInOut(duration: 0.25), value: fraction)
+                if administrator != .asking { SweepHighlight() }
                 VStack(spacing: 2) {
-                    Text("\(Int((fraction * 100).rounded()))%").font(.system(size: 34, weight: .bold, design: .rounded).monospacedDigit()).contentTransition(.numericText())
+                    Text("\(Int((fraction * 100).rounded()))%").font(.system(size: 34, weight: .bold, design: .rounded).monospacedDigit())
                     Text("\(done) of \(total)").font(.caption.monospacedDigit()).foregroundStyle(.secondary)
                 }
             }
             .frame(width: 150, height: 150)
-            CurrentItemLine(item: current)
+            CurrentItemLine(item: current, administrator: administrator)
                 .frame(height: 44)
             ShimmerBar(fraction: fraction).frame(width: 360, height: 8)
             RecentFeed(items: recent, freedSoFar: freedSoFar)
@@ -456,36 +478,55 @@ struct SweepHighlight: View {
     }
 }
 
-/// The item currently being removed, sliding in from below as it changes.
+/// The item currently being removed, or what the administrator step is waiting for. One row whose contents change
+/// in place.
 struct CurrentItemLine: View {
     let item: ScanItem?
+    var administrator: AdminAuthorizedRunner.Activity = .idle
 
     var body: some View {
-        ZStack {
-            if let item {
-                HStack(spacing: 10) {
-                    if item.kind == .registration {
-                        Image(systemName: CleanupSymbols.symbol(for: item.group)).foregroundStyle(Theme.accent).frame(width: 24)
-                    } else {
-                        FileIcon(url: item.url, size: 24)
-                    }
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text(item.title).lineLimit(1)
-                        Text(item.group + (item.size > 0 ? " · \(item.size.formattedBytes)" : "")).font(.caption).foregroundStyle(.secondary)
-                    }
-                    Spacer(minLength: 0)
-                    ProgressView().controlSize(.small)
-                }
-                .padding(.horizontal, 12).padding(.vertical, 8)
-                .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Color.primary.opacity(0.06)))
-                .frame(width: 360)
-                .id(item.id)
-                .transition(.asymmetric(insertion: .move(edge: .bottom).combined(with: .opacity), removal: .move(edge: .top).combined(with: .opacity)))
+        HStack(spacing: 10) {
+            icon.frame(width: 24, height: 24)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(title).lineLimit(1).truncationMode(.middle)
+                Text(detail).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+            }
+            Spacer(minLength: 0)
+            if administrator != .asking, item != nil || administrator == .working { ProgressView().controlSize(.small) }
+        }
+        .padding(.horizontal, 12).padding(.vertical, 8)
+        .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Color.primary.opacity(0.06)))
+        .frame(width: 360)
+        .transaction { $0.animation = nil }
+    }
+
+    @ViewBuilder private var icon: some View {
+        switch administrator {
+        case .asking: Image(systemName: "lock.shield").font(.title3).foregroundStyle(Theme.warning)
+        case .working: Image(systemName: "lock.open").font(.title3).foregroundStyle(Theme.accent)
+        case .idle:
+            if let item, item.kind != .registration {
+                FileIcon(url: item.url, size: 24)
             } else {
-                Text("Preparing…").font(.callout).foregroundStyle(.secondary).transition(.opacity)
+                Image(systemName: item.map { CleanupSymbols.symbol(for: $0.group) } ?? "hourglass").foregroundStyle(Theme.accent)
             }
         }
-        .animation(.spring(duration: 0.35), value: item?.id)
+    }
+
+    private var title: String {
+        switch administrator {
+        case .asking: "macOS is asking for your password"
+        case .working: "Removing items that belong to the system"
+        case .idle: item?.title ?? "Preparing…"
+        }
+    }
+
+    private var detail: String {
+        switch administrator {
+        case .asking: "Some items belong to the system. The rest continues once you answer."
+        case .working: "This can take a moment"
+        case .idle: item.map { $0.group + ($0.size > 0 ? " · \($0.size.formattedBytes)" : "") } ?? " "
+        }
     }
 }
 
@@ -516,8 +557,10 @@ struct ShimmerBar: View {
     }
 }
 
-/// The last few removed items, fading out as new ones arrive, plus the running total.
+/// The last few removed items, newest first and fainter as they age, plus the running total. A fixed number of
+/// rows whose contents change in place.
 struct RecentFeed: View {
+    static let rows = 5
     let items: [ScanItem]
     let freedSoFar: Int64
 
@@ -526,21 +569,25 @@ struct RecentFeed: View {
             HStack {
                 Text("Removed").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
                 Spacer()
-                Text("\(freedSoFar.formattedBytes) freed so far").font(.caption.monospacedDigit()).foregroundStyle(.secondary).contentTransition(.numericText())
+                Text("\(freedSoFar.formattedBytes) freed so far").font(.caption.monospacedDigit()).foregroundStyle(.secondary)
             }
-            ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
+            ForEach(0..<Self.rows, id: \.self) { index in
                 HStack(spacing: 8) {
-                    Image(systemName: "checkmark.circle.fill").foregroundStyle(Theme.success).font(.caption)
-                    Text(item.title).font(.caption).lineLimit(1)
-                    Spacer()
-                    Text(item.size.formattedBytes).font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                    if index < items.count {
+                        Image(systemName: "checkmark.circle.fill").foregroundStyle(Theme.success).font(.caption)
+                        Text(items[index].title).font(.caption).lineLimit(1).truncationMode(.middle)
+                        Spacer()
+                        Text(items[index].size.formattedBytes).font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                    } else {
+                        Spacer()
+                    }
                 }
+                .frame(height: 16)
                 .opacity(1 - Double(index) * 0.15)
-                .transition(.asymmetric(insertion: .move(edge: .top).combined(with: .opacity), removal: .opacity))
             }
         }
         .frame(width: 360)
-        .animation(.spring(duration: 0.4), value: items.map(\.id))
+        .transaction { $0.animation = nil }
     }
 }
 

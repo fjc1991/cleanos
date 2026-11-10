@@ -122,7 +122,7 @@ final class CleanUpModel {
     func sizeText(for category: CleanupCategoryInfo) -> String {
         if scanning.contains(category.id) { return "…" }
         guard let result = results[category.id] else { return "–" }
-        return result.totalSize == 0 ? "–" : result.totalSize.formattedBytes
+        return result.removableSize == 0 ? "–" : result.removableSize.formattedBytes
     }
 
     func state(for category: CleanupCategoryInfo) -> SelectionState {

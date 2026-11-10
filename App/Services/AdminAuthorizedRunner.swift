@@ -1,6 +1,7 @@
 import AppKit
 import CleanCore
 import HelperProtocol
+import Observation
 
 /// Runs one helper request with administrator rights through the standard macOS password prompt
 /// ("CleanOS wants to make changes"). Needs no installed helper and no Developer ID, so it always works.
@@ -10,9 +11,19 @@ import HelperProtocol
 /// the check and the launch. The request travels inside the authorised command, never through a file. The command
 /// runs in the background and writes its JSON answer into a private folder the app polls, so long removals do not
 /// freeze the app; only the password dialog itself is modal.
-@MainActor
+@MainActor @Observable
 final class AdminAuthorizedRunner {
     static let shared = AdminAuthorizedRunner()
+
+    /// What the runner is doing, for a window that shows it.
+    enum Activity: Equatable {
+        case idle
+        /// macOS is showing its password dialog. The app's window cannot update until it is answered.
+        case asking
+        /// The password was accepted and the work is running.
+        case working
+    }
+    private(set) var activity: Activity = .idle
 
     enum Failure: Error, LocalizedError {
         case cancelled, couldNotStart(String), noAnswer
@@ -51,7 +62,13 @@ final class AdminAuthorizedRunner {
 
         var errorInfo: NSDictionary?
         guard let script = NSAppleScript(source: source) else { return .failure(.couldNotStart("script error")) }
+        // The password dialog blocks this thread until it is answered (AppleScript runs on the main thread only), so
+        // the window freezes as it is. Say what is happening first and give it a moment to draw that.
+        activity = .asking
+        defer { activity = .idle }
+        try? await Task.sleep(for: .milliseconds(500))
         let descriptor = script.executeAndReturnError(&errorInfo)
+        activity = .working
         if let errorInfo {
             if (errorInfo[NSAppleScript.errorNumber] as? Int) == -128 { return .failure(.cancelled) }
             return .failure(.couldNotStart(errorInfo[NSAppleScript.errorMessage] as? String ?? "unknown error"))

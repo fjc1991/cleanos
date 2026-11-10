@@ -374,7 +374,7 @@ public struct MailAttachmentsScanner: CleanupScanner {
 
 public struct PurgeableSpaceScanner: CleanupScanner {
     public let info = CleanupCategoryInfo(id: "purgeable", title: "Purgeable space",
-        description: "Space macOS keeps for itself (snapshots, caches, copies of cloud files) and gives back by itself when an app needs room. When the startup disk is nearly full, CleanOS can make macOS release it now by writing a temporary file until macOS purges, then deleting the file. Local Time Machine snapshots can be deleted with the helper.",
+        description: "Space macOS keeps for itself (snapshots, caches, copies of cloud files) and gives back by itself when an app needs room. Finder already counts it as available. Only when the startup disk is nearly full can CleanOS make macOS release it now, by writing a temporary file until macOS purges and then deleting the file. Local Time Machine snapshots can be deleted here with administrator rights.",
         systemImage: "square.stack.3d.up.slash", tier: .caution, isPerVolume: true)
     public init() {}
 
@@ -396,9 +396,18 @@ public struct PurgeableSpaceScanner: CleanupScanner {
                 }
             }
             // The reclaim fills the disk it runs on, so it is only offered for the startup disk.
-            if volume.isRoot, volume.isAPFS, let row = Self.purgeRow(for: volume) { children.insert(row, at: 0) }
+            var explanation: String?
+            if volume.isRoot, volume.isAPFS, let row = Self.purgeRow(for: volume) {
+                if row.tier == .protected && children.isEmpty {
+                    // Nothing can be done here: say why in the disk's own row instead of hiding it in a folded child.
+                    explanation = row.subtitle
+                } else {
+                    children.insert(row, at: 0)
+                }
+            }
             if !children.isEmpty || volume.isRoot {
-                let subtitle = (volume.purgeableCapacity == 0 ? "Nothing purgeable right now" : "\(volume.purgeableCapacity.formattedBytes) purgeable")
+                let amount = volume.purgeableCapacity == 0 ? "Nothing purgeable right now" : "\(volume.purgeableCapacity.formattedBytes) purgeable"
+                let subtitle = (explanation.map { amount + ". " + $0 } ?? amount)
                     + (snapshotCount > 0 ? " · \(snapshotCount) snapshot\(snapshotCount == 1 ? "" : "s")" : "")
                 // Without children the group is a row of its own; it holds nothing to remove.
                 groups.append(ScanItem(id: "purgeable:\(volume.id)", title: volume.name, subtitle: subtitle, kind: .group,
@@ -418,7 +427,7 @@ public struct PurgeableSpaceScanner: CleanupScanner {
         let matchedBy = ["volumeAvailableCapacityForImportantUsage − volumeAvailableCapacity"]
         guard let write = PurgeableReclaimer.plannedWrite(available: volume.availableCapacity, purgeable: purgeable) else {
             return ScanItem(id: "purge:\(volume.id)", title: "\(purgeable.formattedBytes) of purgeable space",
-                            subtitle: "macOS releases this by itself as soon as an app needs the space. Releasing it now would mean writing about \(volume.availableCapacity.formattedBytes) of temporary data, so CleanOS leaves it to macOS.",
+                            subtitle: "macOS frees this by itself as soon as an app needs the space, so there is nothing to remove. Forcing it now would mean writing about \(volume.availableCapacity.formattedBytes) of temporary data, so CleanOS leaves it to macOS.",
                             kind: .registration, group: group, size: purgeable, tier: .protected, matchedBy: matchedBy,
                             payload: ["type": "purgeInfo", "mount": mount])
         }

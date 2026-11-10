@@ -181,9 +181,10 @@ import Testing
         let result = try #require(await CleanupEngine().scan(categoryID: "purgeable", context: context))
         let leaves = result.items.flatMap(\.leaves)
         #expect(!leaves.contains { $0.payload["type"] == "purge" })
-        let info = try #require(leaves.first { $0.payload["type"] == "purgeInfo" })
+        // The explanation sits in the disk's own row, or in a row beside the snapshots when this Mac has some.
+        let info = try #require(leaves.first { $0.payload["type"] == "purgeInfo" } ?? result.items.first { $0.children.isEmpty && $0.id == "purgeable:root" })
         #expect(info.tier == .protected)
-        #expect(info.subtitle?.contains("macOS releases this by itself") == true)
+        #expect(info.subtitle?.contains("macOS frees this by itself") == true)
         #expect(!RemovalPlan(selected: result.items, permanently: false).registrations.contains { $0.payload["type"]?.hasPrefix("purge") == true })
         // Never offered for an external disk, whatever its free space.
         #expect(!leaves.contains { $0.id.hasPrefix("purge:apfs") })

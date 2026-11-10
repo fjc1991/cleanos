@@ -259,11 +259,15 @@ struct ExpertTreeView: View {
 struct ScanItemRow: View {
     let item: ScanItem
     let selection: SelectionStore
+    /// A row that names no file and can never be ticked is an explanation: it shows its whole text.
+    private var isNote: Bool { !item.tier.isSelectable && item.url == nil }
 
     var body: some View {
         HStack(spacing: 8) {
             TriStateCheckbox(state: selection.state(of: item), isEnabled: item.tier.isSelectable, title: item.title) { selection.toggle(item) }
-            if item.kind == .registration {
+            if isNote {
+                Image(systemName: "info.circle").frame(width: 18).foregroundStyle(.secondary)
+            } else if item.kind == .registration {
                 Image(systemName: "text.alignleft").frame(width: 18).foregroundStyle(Theme.accent)
             } else {
                 FileIcon(url: item.url)
@@ -272,9 +276,13 @@ struct ScanItemRow: View {
                 HStack(spacing: 6) {
                     Text(item.title).lineLimit(1)
                     if item.needsRoot { Image(systemName: "lock.fill").font(.caption2).foregroundStyle(.secondary).help("Needs administrator privileges") }
-                    TierBadge(tier: item.tier)
+                    if !isNote { TierBadge(tier: item.tier) }
                 }
-                Text(item.subtitle ?? item.url?.deletingLastPathComponent().path ?? "").font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                if isNote {
+                    Text(item.subtitle ?? "").font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                } else {
+                    Text(item.subtitle ?? item.url?.deletingLastPathComponent().path ?? "").font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                }
             }
             Spacer()
             Text(item.size.formattedBytes).font(.caption.monospacedDigit()).foregroundStyle(.secondary).frame(width: 80, alignment: .trailing)

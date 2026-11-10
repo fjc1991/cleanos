@@ -178,6 +178,35 @@ actor StubRootRemover: RootRemover {
         #expect(item("/private/var/db/receipts/com.example.pkg.bom", kind: .registration).markedProtectedIfRefused().tier == .safe)
     }
 
+    /// The window reads progress a few times a second: nothing reported in between may be lost or shown twice.
+    @Test func progressRelayCoalescesWithoutLosingItems() {
+        let relay = RemovalProgressRelay(keeping: 3)
+        #expect(relay.take().changed == false)
+        let items = (0..<10).map { ScanItem(url: URL(filePath: "/tmp/x/\($0)"), title: "item \($0)", kind: .file, group: "Caches", size: 100) }
+        for (index, item) in items.enumerated() {
+            relay.report(done: index, total: items.count, current: item)       // started
+            relay.report(done: index + 1, total: items.count, current: nil)    // finished
+        }
+        let first = relay.take()
+        #expect(first.changed && first.done == 10 && first.total == 10)
+        #expect(first.freed == 1000)                                           // every item counts, not only the ones kept
+        #expect(first.finished.map(\.title) == ["item 7", "item 8", "item 9"])
+        #expect(first.current?.title == "item 9")
+        let second = relay.take()
+        #expect(!second.changed && second.finished.isEmpty && second.freed == 1000 && second.done == 10)
+    }
+
+    @Test func progressRelayIsSafeAcrossThreads() async {
+        let relay = RemovalProgressRelay()
+        let item = ScanItem(url: URL(filePath: "/tmp/x/a"), title: "a", kind: .file, group: "Caches", size: 1)
+        await withTaskGroup(of: Void.self) { group in
+            for index in 0..<200 {
+                group.addTask { relay.report(done: index, total: 200, current: index.isMultiple(of: 2) ? item : nil); _ = relay.take() }
+            }
+        }
+        #expect(relay.take().total == 200)
+    }
+
     @Test func classificationTellsAdministratorFromPrivacy() throws {
         let fixture = try Self.makeFixture()
         defer { Self.cleanUp(fixture) }

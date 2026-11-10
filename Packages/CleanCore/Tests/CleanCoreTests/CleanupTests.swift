@@ -115,6 +115,23 @@ import Testing
         }
     }
 
+    /// With far more free space than purgeable space nothing can be done: the disk's row says why, and nothing
+    /// in the category counts as removable.
+    @Test func scannerExplainsWhenTheReclaimIsNotOffered() async throws {
+        let root = VolumeInfo(id: "root", url: URL(filePath: "/"), name: "Macintosh HD", format: "APFS", isInternal: true, isRemovable: false,
+                              isEjectable: false, isLocal: true, isRoot: true, totalCapacity: 1_000_000_000_000, availableCapacity: 600_000_000_000,
+                              availableForImportantUsage: 610_000_000_000)
+        let context = CleanupContext(volumes: [root], enabledVolumeIDs: [], installedApps: [], rules: .bundled)
+        let result = await CleanupEngine().scan(categoryID: "purgeable", context: context)!
+        let row = try #require(result.items.first)
+        // The explanation sits in the disk's own row, or in a row beside the snapshots when this Mac has some.
+        let note = row.children.isEmpty ? row : try #require(row.children.first { $0.payload["type"] == "purgeInfo" })
+        #expect(note.tier == .protected)
+        #expect(note.subtitle?.contains("frees this by itself") == true)
+        #expect(result.removableSize == 0 && !result.removableLeaves.contains { $0.payload["type"]?.hasPrefix("purge") == true })
+        #expect(result.totalSize == 10_000_000_000)
+    }
+
     @Test func scannerOffersReclaimActionWhenPurgeable() async {
         let root = VolumeInfo(id: "root", url: URL(filePath: "/"), name: "Macintosh HD", format: "APFS", isInternal: true, isRemovable: false,
                               isEjectable: false, isLocal: true, isRoot: true, totalCapacity: 1_000_000_000_000, availableCapacity: 10_000_000_000,
