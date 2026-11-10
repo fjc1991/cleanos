@@ -42,6 +42,12 @@ public actor RemainsLocator {
         self.appLookup = appLookup
     }
 
+    /// True when the last check before removal would refuse the path, so it is not reported as a leftover at all.
+    private func isOffLimits(_ path: String) -> Bool {
+        rules.protectedRules.isProtected(path, home: home)
+            || RemovalGuard.refusal(for: URL(filePath: path), home: home, rules: rules.protectedRules) != nil
+    }
+
     /// True when Launch Services knows an app with this bundle ID, installed somewhere the catalog did not scan or on a volume
     /// that is not mounted right now (both mean: not a leftover).
     private func registeredElsewhere(_ bundleID: String) -> Bool {
@@ -213,7 +219,7 @@ public actor RemainsLocator {
                     guard let candidate = NameMatcher.reduce(name, style: rule.nameStyle).first, !candidate.isEmpty else { continue }
                     guard let shape = Self.identifierShape(candidate, original: name) else { continue }
                     if rules.protectedRules.isProtected(bundleID: candidate) || rules.shared.isShared(bundleID: candidate) { continue }
-                    if rules.protectedRules.isProtected(path, home: home) { continue }
+                    if isOffLimits(path) { continue }
                     if Self.isOwned(candidate, shape: shape, installedIDs: installedIDs, installedTeams: installedTeams, installedGroups: installedGroups, running: running) { continue }
                     if ownedLabels.contains(where: { fnmatch($0, candidate, 0) == 0 }) { continue }
                     if preparedIdentities.contains(where: { identity, names in
@@ -367,7 +373,7 @@ public actor RemainsLocator {
             // Only what the package alone owns: never a shared parent, never a folder holding files it did not install.
             for path in PackageReceipts.ownedPayloadPaths(manifest: manifest, base: info.base) {
                 let url = URL(filePath: path)
-                if rules.protectedRules.isProtected(path, home: home) { continue }
+                if isOffLimits(path) { continue }
                 if installedAppPaths.contains(where: { path == $0 || path.hasPrefix($0 + "/") || $0.hasPrefix(path + "/") }) { continue }
                 let group = path.hasPrefix("/Library/LaunchAgents/") || path.hasPrefix("/Library/LaunchDaemons/") || path.hasPrefix("/Library/PrivilegedHelperTools/") ? "Login Items"
                     : path.hasPrefix("/Applications/") ? "Executables" : path.hasPrefix("/usr/local/") ? "CLI Tools" : "Application Support"
@@ -401,7 +407,7 @@ public actor RemainsLocator {
             let patterns = family.paths.map { ($0, false) } + (family.cautionPaths ?? []).map { ($0, true) }
             for (pattern, sharedWithOtherTools) in patterns {
                 for path in PathExpander.glob(PathExpander.expand(pattern, home: home)) {
-                    if rules.protectedRules.isProtected(path, home: home) { continue }
+                    if isOffLimits(path) { continue }
                     let url = URL(filePath: path)
                     let group = Self.group(forPath: path, home: home)
                     // Synced cloud folders and user documents are never pre-selected.

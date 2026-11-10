@@ -89,7 +89,8 @@ public actor FileCategoriesScanner {
                 totals[index].count += 1
                 buckets[index].append(ScanItem(url: url, title: url.lastPathComponent, subtitle: url.deletingLastPathComponent().path, kind: isPackage ? .bundle : .file,
                                                group: totals[index].title, size: bytes, tier: .caution, matchedBy: ["file kind"],
-                                               needsRoot: !FileRemover.isUserRemovable(url), modificationDate: values.contentModificationDate))
+                                               needsRoot: !FileRemover.isUserRemovable(url), modificationDate: values.contentModificationDate)
+                    .markedProtectedIfRefused(home: home.path))
                 if buckets[index].count > itemLimit * 4 {
                     buckets[index].sort { $0.size > $1.size }
                     buckets[index] = Array(buckets[index].prefix(itemLimit))

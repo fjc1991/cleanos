@@ -128,6 +128,56 @@ actor StubRootRemover: RootRemover {
         }
     }
 
+    /// The per-user folders under /private/var/folders hold app caches the uninstaller and Clean Up offer.
+    @Test func guardAllowsItemsInThePerUserFolders() {
+        for token in ["$DARWIN_USER_CACHE_DIR", "$DARWIN_USER_TEMP_DIR", "$DARWIN_USER_DIR"] {
+            let folder = PathExpander.expand(token)
+            #expect(folder.contains("/var/folders/"), "\(token) should be a per-user folder, got \(folder)")
+            #expect(RemovalGuard.refusal(for: URL(filePath: folder + "/com.example.app")) == nil, "an item in \(token) must be allowed")
+            #expect(RemovalGuard.refusal(for: URL(filePath: folder + "/com.example.app/Cache.db")) == nil)
+            #expect(RemovalGuard.refusal(for: URL(filePath: folder)) != nil, "\(token) itself must be refused")
+        }
+        // Another user's per-user folder is not this user's scratch space.
+        #expect(RemovalGuard.refusal(for: URL(filePath: "/private/var/folders/zz/zyxvpxvq6csfxvn_n0000000000000/C/com.example.app")) != nil)
+        #expect(RemovalGuard.refusal(for: URL(filePath: "/private/var/folders")) != nil)
+    }
+
+    /// An app's item in a folder the leftover catalogue lists must pass the last check, or the review sheet offers
+    /// something the removal then refuses. The folders below are refused on purpose: the uninstaller shows what it
+    /// finds there as protected. A new entry here must be a decision, not an accident.
+    @Test func guardAgreesWithTheCatalogue() {
+        let knownProtected: Set<String> = [
+            "~/Library/CloudStorage", "~/Library/Mail/Bundles", "/private/etc/cups/ppd", "/Library/Security/SecurityAgentPlugins",
+            "/private/var/db/receipts", "/etc/paths.d", "/etc/manpaths.d", "/etc/resolver", "/etc/sudoers.d", "/etc/pam.d",
+            "/etc/newsyslog.d", "/etc/profile.d", "/private/var/root/Library/Caches", "/private/var/root/Library/Application Support",
+            "/private/var/root/Library/Preferences", "/private/var/root/Library/Logs",
+        ]
+        var refused: Set<String> = []
+        for rule in Rules.bundled.catalogue.roots {
+            for root in rule.allRoots where !root.contains("*") {
+                let name = rule.nameStyle == .dotfile ? ".cleanos-fixture" : "com.example.cleanos-fixture"
+                if RemovalGuard.refusal(for: URL(filePath: PathExpander.expand(root) + "/" + name)) != nil { refused.insert(root) }
+            }
+        }
+        #expect(refused.subtracting(knownProtected).isEmpty, "offered by the catalogue but refused: \(refused.subtracting(knownProtected).sorted())")
+        #expect(knownProtected.subtracting(refused).isEmpty, "no longer refused: \(knownProtected.subtracting(refused).sorted())")
+    }
+
+    /// Lists mark what the last check would refuse as protected instead of offering it.
+    @Test func refusedLocationsAreShownAsProtected() {
+        let home = NSHomeDirectory()
+        func item(_ path: String, kind: ItemKind = .file) -> ScanItem { ScanItem(url: URL(filePath: path), title: "x", kind: kind, group: "g", tier: .safe) }
+        #expect(item("/private/var/db/receipts/com.example.pkg.bom").markedProtectedIfRefused().tier == .protected)
+        #expect(item(home + "/Library/Mail/V10/big.emlx").markedProtectedIfRefused().tier == .protected)
+        #expect(item(home + "/Library/CloudStorage/Dropbox", kind: .directory).markedProtectedIfRefused().tier == .protected)
+        #expect(item(home + "/Library/CloudStorage/Dropbox/Scans/big.pdf").markedProtectedIfRefused().tier == .safe)
+        #expect(item(home + "/Library/Caches/com.example.app", kind: .directory).markedProtectedIfRefused().tier == .safe)
+        #expect(item(PathExpander.expand("$DARWIN_USER_CACHE_DIR") + "/com.example.app", kind: .directory).markedProtectedIfRefused().tier == .safe)
+        #expect(item("/Users/Shared/Example", kind: .directory).markedProtectedIfRefused().tier == .safe)
+        // A registration's path names what it refers to; nothing at that path is removed.
+        #expect(item("/private/var/db/receipts/com.example.pkg.bom", kind: .registration).markedProtectedIfRefused().tier == .safe)
+    }
+
     @Test func classificationTellsAdministratorFromPrivacy() throws {
         let fixture = try Self.makeFixture()
         defer { Self.cleanUp(fixture) }

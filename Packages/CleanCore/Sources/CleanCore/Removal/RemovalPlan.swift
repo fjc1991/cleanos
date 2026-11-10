@@ -3,6 +3,19 @@ import HelperProtocol
 
 /// Removes items with administrator rights: the privileged helper when it is installed, otherwise one macOS
 /// administrator password prompt per batch. The app supplies the implementation; tests use a stub.
+extension ScanItem {
+    /// This item as a list should show it: protected when the last check before removal would refuse it, so no
+    /// section offers something the removal then turns down.
+    public func markedProtectedIfRefused(home: String = NSHomeDirectory(), rules: ProtectedRules = Rules.bundled.protectedRules) -> ScanItem {
+        guard tier != .protected, kind != .registration, kind != .group, kind != .volume, let url,
+              RemovalGuard.refusal(for: url, home: home, rules: rules) != nil else { return self }
+        var item = self
+        item.tier = .protected
+        item.matchedBy.append("protected location")
+        return item
+    }
+}
+
 public protocol RootRemover: Sendable {
     /// One result per request (matched by path). An implementation that could not run at all returns failures.
     func remove(_ requests: [RootRemovalRequest]) async -> [RootRemovalResult]
@@ -14,7 +27,8 @@ public protocol RootRemover: Sendable {
 public enum RemovalGuard {
     public static func refusal(for url: URL, home: String = NSHomeDirectory(), rules: ProtectedRules = Rules.bundled.protectedRules) -> String? {
         let path = ProtectedPaths.canonical(url.path)
-        // The user's own temporary folder lives in /private/var/folders, which only the root side refuses outright.
+        // The user's own cache, temporary and per-user folders live in /private/var/folders, which only the root side
+        // refuses outright. Items inside them are app caches the scanners offer; the folders themselves stay refused.
         let inScratch = userScratch.contains { path.lowercased().hasPrefix($0 + "/") }
         if !inScratch, let reason = ProtectedPaths.refusal(for: path) { return "CleanOS never removes \(reason)." }
         let resolvedHome = ProtectedPaths.canonical(home)
@@ -24,8 +38,14 @@ public enum RemovalGuard {
         return nil
     }
 
-    static let userScratch: [String] = [FileManager.default.temporaryDirectory.path, NSTemporaryDirectory()]
-        .map { ProtectedPaths.canonical(($0 as NSString).standardizingPath).lowercased() }
+    /// The current user's folders under /private/var/folders: `C` (caches), `T` (temporary files) and `0`.
+    static let userScratch: [String] = Set(
+        ([FileManager.default.temporaryDirectory.path, NSTemporaryDirectory()]
+            + [_CS_DARWIN_USER_CACHE_DIR, _CS_DARWIN_USER_TEMP_DIR, _CS_DARWIN_USER_DIR].map(PathExpander.confstrValue))
+            .filter { !$0.isEmpty }
+            .map { ProtectedPaths.canonical(($0 as NSString).standardizingPath).lowercased() }
+            .filter { $0.hasPrefix("/private/var/folders/") && $0.split(separator: "/").count >= 6 }
+    ).sorted()
 }
 
 /// Selected items partitioned by how they are expected to be removed. `needsRoot` is only a hint: every file is

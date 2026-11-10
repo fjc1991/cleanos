@@ -133,6 +133,7 @@ enum CleanupSupport {
                             kind: (size?.directoryCount ?? 0) > 0 || isDirectory(url) ? .directory : .file, group: group,
                             size: size?.bytes ?? 0, tier: protection == .none ? tier : .protected, matchedBy: matchedBy + (protection == .none ? [] : ["system protection: \(protection)"]),
                             needsRoot: needsRoot || !FileRemover.isUserRemovable(url), modificationDate: modificationDate(url), payload: payload)
+                .markedProtectedIfRefused(home: home)
         }
         .sorted { $0.size > $1.size }
     }

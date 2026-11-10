@@ -15,7 +15,7 @@ public actor LargeFilesScanner {
     /// Cancelling the calling task stops the walk; what was found until then is returned.
     public func scan(roots: [URL], options: Options = Options(), progress: (@Sendable (Int) -> Void)? = nil) async -> [ScanItem] {
         let found = await StructuredWork.run { Self.walk(roots: roots, options: options, progress: progress) }
-        return Array(found.sorted { $0.size > $1.size }.prefix(options.limit))
+        return found.sorted { $0.size > $1.size }.prefix(options.limit).map { $0.markedProtectedIfRefused() }
     }
 
     static let keys: Set<URLResourceKey> = [.isRegularFileKey, .isPackageKey, .isDirectoryKey, .totalFileAllocatedSizeKey, .fileSizeKey,

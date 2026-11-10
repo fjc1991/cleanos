@@ -162,7 +162,9 @@ public actor LeftoverLocator {
 
         for index in deduped.indices {
             let path = deduped[index].url.standardizedFileURL.path
-            if rules.protectedRules.isProtected(path, home: home) {
+            // The same check the removal runs last, so nothing is offered here that it would refuse.
+            if rules.protectedRules.isProtected(path, home: home)
+                || (deduped[index].kind != .registration && RemovalGuard.refusal(for: deduped[index].url, home: home, rules: rules.protectedRules) != nil) {
                 deduped[index].tier = .protected
                 deduped[index].subtitle = "Protected location"
                 continue

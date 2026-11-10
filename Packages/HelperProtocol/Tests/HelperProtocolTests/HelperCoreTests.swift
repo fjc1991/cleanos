@@ -29,6 +29,7 @@ import Foundation
         "/Library/PrivilegedHelperTools/us.zoom.ZoomDaemon", "/Library/Caches/com.apple.amsengagementd", "/usr/local/bin/docker",
         "/Library/DropboxHelperTools", "/opt/cisco", "/private/tmp/KSInstallAction.abc", "/Volumes/Backup/.Trashes/502",
         "/Volumes/Backup/Users/me/Library/Caches/x", "/Library/Google/GoogleSoftwareUpdate",
+        "/Users/Shared/Adobe", "/Users/Shared/Parallels/Backups", "/Users/Shared/Library/Application Support/Example",
     ])
     func appLeftoversAreAllowed(_ path: String) {
         #expect(ProtectedPaths.refusal(for: path) == nil, "\(path) should be allowed")
@@ -39,6 +40,28 @@ import Foundation
                      "/Applications/Example.app", "/Downloads/Example.dmg", "/Pictures/Photos Library.photoslibrary"] {
             #expect(ProtectedPaths.refusal(for: home + name) == nil, "~\(name) should be allowed")
         }
+    }
+
+    @Test func sharedUsersFolderKeepsItsLibrary() {
+        for path in ["/Users/Shared", "/Users/Shared/Library", "/Users/Shared/Library/Application Support", "/Users/Shared/Library/Caches"] {
+            #expect(ProtectedPaths.refusal(for: path) != nil, "\(path) should be refused")
+        }
+    }
+
+    /// A folder directly in a home folder is the user's own; a single file or an app there is not.
+    @Test func filesAndAppsDirectlyInHomeAreAllowed() throws {
+        let file = home + "/cleanos-test-\(UUID().uuidString).iso"
+        let folder = home + "/cleanos-test-\(UUID().uuidString)"
+        #expect(FileManager.default.createFile(atPath: file, contents: Data("x".utf8)))
+        try FileManager.default.createDirectory(atPath: folder, withIntermediateDirectories: false)
+        defer {
+            try? FileManager.default.removeItem(atPath: file)
+            try? FileManager.default.removeItem(atPath: folder)
+        }
+        #expect(ProtectedPaths.refusal(for: file) == nil, "a file in the home folder should be allowed")
+        #expect(ProtectedPaths.refusal(for: home + "/Example.app") == nil, "an app in the home folder should be allowed")
+        #expect(ProtectedPaths.refusal(for: folder) != nil, "a folder in the home folder should be refused")
+        #expect(ProtectedPaths.refusal(for: home + "/cleanos-test-missing") != nil, "something that is not there should be refused")
     }
 
     @Test func traversalAndSymlinkedParentsAreResolved() throws {

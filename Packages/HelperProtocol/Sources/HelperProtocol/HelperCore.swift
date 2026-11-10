@@ -200,12 +200,22 @@ public enum ProtectedPaths {
             let rest = Array(components.dropFirst(2))
             if rest.count == 1 && rest[0].lowercased() == ".trashes" { return "the disk's Trash folder" }
             if [".trashes", ".spotlight-v100", ".fseventsd", ".documentrevisions-v100", ".temporaryitems"].contains(rest[0].lowercased()) { return nil }
-            return judge(rest, lower: "/" + rest.joined(separator: "/").lowercased())
+            return judge(rest, lower: "/" + rest.joined(separator: "/").lowercased(), onDisk: path)
         }
-        return judge(components, lower: lower)
+        return judge(components, lower: lower, onDisk: path)
     }
 
-    private static func judge(_ c: [String], lower: String) -> String? {
+    /// True for something that holds no other items (a plain file or a symbolic link) and for an app bundle.
+    private static func isFileOrApp(_ path: String) -> Bool {
+        if path.lowercased().hasSuffix(".app") { return true }
+        var info = stat()
+        guard lstat(path, &info) == 0 else { return false }
+        let type = info.st_mode & S_IFMT
+        return type == S_IFREG || type == S_IFLNK
+    }
+
+    /// `c` and `lower` are relative to the item's disk; `onDisk` is where the item really is.
+    private static func judge(_ c: [String], lower: String, onDisk: String) -> String? {
         if c.count == 1 { return "a top-level folder of the disk" }
         if deniedExact.contains(lower) { return "a folder shared by other software" }
         switch c[0].lowercased() {
@@ -217,9 +227,19 @@ public enum ProtectedPaths {
         case "users":
             if c.count == 2 { return "a user's home folder" }
             let name = c[2]
-            if c.count == 3 && (homeKeep.contains(name.lowercased()) || !name.hasPrefix(".")) { return "a folder in a home folder" }
+            if c.count == 3 {
+                if c[1].lowercased() == "shared" {
+                    // Installers keep files for every user in /Users/Shared: a vendor's folder there is a leftover.
+                    if name.lowercased() == "library" { return "a shared system folder" }
+                } else if homeKeep.contains(name.lowercased()) || (!name.hasPrefix(".") && !isFileOrApp(onDisk)) {
+                    // Folders directly in a home folder are the user's own; a single file or an app there may go.
+                    return "a folder in a home folder"
+                }
+            }
             if c.count == 4 && name == "Library" && libraryFolders.contains(c[3].lowercased()) { return "a shared folder in a user's Library" }
-            if c.count >= 5 && name == "Library" && ["mail", "messages", "keychains", "cloudstorage"].contains(c[3].lowercased()) { return "personal data" }
+            if c.count >= 5 && name == "Library" && ["mail", "messages", "keychains"].contains(c[3].lowercased()) { return "personal data" }
+            // A cloud provider's folder holds the user's documents: it is never removed whole, single items in it may go.
+            if c.count == 5 && name == "Library" && c[3].lowercased() == "cloudstorage" { return "a cloud storage folder" }
             if c.count >= 4 && name == "Library" && c[3] == "Mobile Documents" && c.count <= 5 && (c.count == 4 || c[4] == "com~apple~CloudDocs") { return "iCloud Drive" }
         case "private":
             if c.count == 2 { return "a system folder" }

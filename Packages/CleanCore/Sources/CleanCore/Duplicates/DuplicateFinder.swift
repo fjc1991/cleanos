@@ -84,7 +84,7 @@ public actor DuplicateFinder {
             guard candidates.count > 1 else { return nil }
             let files = candidates.sorted { ($0.created ?? .distantFuture, $0.url.pathComponents.count) < ($1.created ?? .distantFuture, $1.url.pathComponents.count) }
                 .map { c in ScanItem(url: c.url, title: c.url.lastPathComponent, subtitle: c.url.deletingLastPathComponent().path, kind: .file, group: "Duplicates",
-                                     size: c.size, tier: .normal, matchedBy: ["identical contents"], needsRoot: !FileRemover.isUserRemovable(c.url), modificationDate: c.modified) }
+                                     size: c.size, tier: .normal, matchedBy: ["identical contents"], needsRoot: !FileRemover.isUserRemovable(c.url), modificationDate: c.modified).markedProtectedIfRefused() }
             return DuplicateGroup(id: key, size: candidates[0].size, files: files)
         }
         .sorted { $0.wastedBytes > $1.wastedBytes }
