@@ -22,11 +22,11 @@ OPENSSL=/usr/bin/openssl   # LibreSSL writes .p12 files the macOS keychain can i
 ask_password() {
   local first second
   read -rs "first?$1: "; echo
+  [[ ${#first} -ge 8 ]] || { echo "✗ The password needs at least 8 characters. Nothing was created; run the command again." >&2; exit 1; }
   if [[ "${2:-}" == confirm ]]; then
     read -rs "second?Repeat it: "; echo
-    [[ "$first" == "$second" ]] || { echo "✗ The passwords differ." >&2; exit 1; }
+    [[ "$first" == "$second" ]] || { echo "✗ The passwords differ. Nothing was created; run the command again." >&2; exit 1; }
   fi
-  [[ ${#first} -ge 8 ]] || { echo "✗ Use at least 8 characters." >&2; exit 1; }
   PASSWORD="$first"
 }
 
@@ -50,7 +50,7 @@ extendedKeyUsage = critical, codeSigning
 subjectKeyIdentifier = hash
 CNF
     "$OPENSSL" req -x509 -newkey rsa:3072 -sha256 -days 3650 -nodes -keyout "$WORK/key.pem" -out "$WORK/cert.pem" -config "$WORK/cert.cnf" 2>/dev/null
-    ask_password "Choose a password for the certificate file" confirm
+    ask_password "Choose a password for the certificate file (at least 8 characters)" confirm
     "$OPENSSL" pkcs12 -export -inkey "$WORK/key.pem" -in "$WORK/cert.pem" -name "$NAME" -out "$P12" -passout "pass:$PASSWORD"
     chmod 600 "$P12"
     security import "$P12" -k "$HOME/Library/Keychains/login.keychain-db" -P "$PASSWORD" -T /usr/bin/codesign >/dev/null
