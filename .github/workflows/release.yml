@@ -124,7 +124,8 @@ jobs:
           esac
 
       # A manual run (workflow_dispatch) creates the tag v<version> at the commit it ran on; a re-run after a
-      # partial failure replaces the files of the release that already exists.
+      # partial failure replaces the files of the release that already exists. A release made by hand from the
+      # tag while this job was building (as happened for 1.0.0) has no notes, so it gets the same ones.
       - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -133,6 +134,10 @@ jobs:
           TAG="v$VERSION"
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" build/CleanOS-*.dmg build/appcast.xml --clobber
+            if [[ -z "$(gh release view "$TAG" --json body -q .body | tr -d '[:space:]')" ]]; then
+              { cat "$RUNNER_TEMP/footer.md"; echo; gh api "repos/$GH_REPO/releases/generate-notes" -f tag_name="$TAG" -q .body || true; } > "$RUNNER_TEMP/notes.md"
+              gh release edit "$TAG" --notes-file "$RUNNER_TEMP/notes.md" || echo "::warning::The release has no notes and they could not be added."
+            fi
           else
             gh release create "$TAG" build/CleanOS-*.dmg build/appcast.xml \
               --title "CleanOS $VERSION" --notes-file "$RUNNER_TEMP/footer.md" --generate-notes --target "$GITHUB_SHA"
