@@ -70,7 +70,7 @@
 	<key>SUFeedURL</key>
 	<string>https://github.com/$(CLEANOS_GITHUB_REPO)/releases/latest/download/appcast.xml</string>
 	<key>SUPublicEDKey</key>
-	<string>SPARKLE_PUBLIC_KEY_PLACEHOLDER</string>
+	<string>8OFw4VTXIIG+Fn7yr7auh8Y2TcgaAqTrH4J8v4RUS44=</string>
 	<key>SUScheduledCheckInterval</key>
 	<integer>86400</integer>
 </dict>

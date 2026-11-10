@@ -81,7 +81,7 @@ targets:
         NSAppDataUsageDescription: CleanOS scans file sizes only. Grant Full Disk Access so this prompt does not repeat.
         # Sparkle (in-app updates). The feed is the appcast attached to the latest GitHub release.
         SUFeedURL: https://github.com/$(CLEANOS_GITHUB_REPO)/releases/latest/download/appcast.xml
-        SUPublicEDKey: SPARKLE_PUBLIC_KEY_PLACEHOLDER
+        SUPublicEDKey: 8OFw4VTXIIG+Fn7yr7auh8Y2TcgaAqTrH4J8v4RUS44=
         SUEnableAutomaticChecks: true
         SUAutomaticallyUpdate: true
         SUScheduledCheckInterval: 86400
